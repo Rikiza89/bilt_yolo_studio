@@ -1,0 +1,599 @@
+{% extends "base.html" %}
+{% block title %}アノテーション — BILT+YOLO Studio{% endblock %}
+
+{% block body %}
+<div class="d-flex h-100">
+
+  <!-- ─── 左サイドバー ─── -->
+  <div class="sidebar d-flex flex-column gap-2">
+
+    <!-- プロジェクト選択 -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">プロジェクト</label>
+      <select class="form-select form-select-sm" id="proj-select">
+        <option value="">— 選択 —</option>
+        {% for p in projects %}
+        <option value="{{ p }}">{{ p }}</option>
+        {% endfor %}
+      </select>
+      <div class="d-flex gap-1 mt-1">
+        <input type="text" class="form-control form-control-sm" id="new-proj-name"
+               placeholder="新規プロジェクト名">
+        <button class="btn btn-sm btn-outline-primary" id="btn-new-proj">
+          <i class="bi bi-folder-plus"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- 画像アップロード -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">画像をアップロード</label>
+      <input type="file" class="form-control form-control-sm" id="file-upload"
+             multiple accept="image/*">
+      <button class="btn btn-sm btn-outline-secondary w-100 mt-1" id="btn-upload">
+        <i class="bi bi-cloud-upload"></i> アップロード
+      </button>
+    </div>
+
+    <!-- 画像リスト -->
+    <div style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+      <label class="form-label fw-semibold small mb-1">画像一覧</label>
+      <div id="image-list"
+           style="flex:1;overflow-y:auto;border:1px solid var(--bs-border-color);border-radius:4px;font-size:0.78rem">
+        <div class="text-muted p-2">プロジェクトを選択してください</div>
+      </div>
+    </div>
+
+  </div><!-- /left sidebar -->
+
+  <!-- ─── 中央: アノテーションキャンバス ─── -->
+  <div id="annotation-wrap">
+    <canvas id="annotation-canvas"></canvas>
+    <canvas id="anno-overlay"></canvas>
+
+    <!-- キャンバスが空の時のメッセージ -->
+    <div id="canvas-hint" style="position:absolute;color:#555;font-size:1.2rem;pointer-events:none">
+      画像を選択してください
+    </div>
+  </div>
+
+  <!-- ─── 右サイドバー ─── -->
+  <div class="sidebar d-flex flex-column gap-2" style="border-left:1px solid var(--bs-border-color);border-right:none">
+
+    <!-- アノテーションツール -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">描画ツール</label>
+      <div class="btn-group-vertical w-100" role="group">
+        <input type="radio" class="btn-check" name="anno-tool" id="tool-bbox" value="bbox" checked>
+        <label class="btn btn-outline-secondary btn-sm text-start" for="tool-bbox">
+          <i class="bi bi-bounding-box"></i> バウンディングボックス
+        </label>
+        <input type="radio" class="btn-check" name="anno-tool" id="tool-polygon" value="polygon">
+        <label class="btn btn-outline-secondary btn-sm text-start" for="tool-polygon">
+          <i class="bi bi-pentagon"></i> ポリゴン
+        </label>
+      </div>
+    </div>
+
+    <!-- クラス管理 -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">クラス</label>
+      <div id="class-list" style="max-height:180px;overflow-y:auto"></div>
+      <div class="d-flex gap-1 mt-1">
+        <input type="text" class="form-control form-control-sm" id="new-class-name"
+               placeholder="クラス名">
+        <button class="btn btn-sm btn-outline-success" id="btn-add-class">
+          <i class="bi bi-plus-lg"></i>
+        </button>
+      </div>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- アノテーション操作 -->
+    <div class="d-flex flex-column gap-1">
+      <button class="btn btn-sm btn-outline-danger" id="btn-del-last">
+        <i class="bi bi-arrow-counterclockwise"></i> 最後を削除
+      </button>
+      <button class="btn btn-sm btn-outline-warning" id="btn-clear-all">
+        <i class="bi bi-trash"></i> 全削除
+      </button>
+      <button class="btn btn-sm btn-success" id="btn-save-label">
+        <i class="bi bi-floppy"></i> ラベルを保存
+      </button>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- 現在のアノテーション一覧 -->
+    <div style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+      <label class="form-label fw-semibold small mb-1">アノテーション一覧</label>
+      <div id="anno-list"
+           style="flex:1;overflow-y:auto;font-size:0.78rem;border:1px solid var(--bs-border-color);border-radius:4px"></div>
+    </div>
+
+    <!-- ナビゲーション -->
+    <div class="d-flex justify-content-between">
+      <button class="btn btn-sm btn-outline-secondary" id="btn-prev">
+        <i class="bi bi-chevron-left"></i> 前
+      </button>
+      <span id="img-index" class="small text-muted align-self-center">—/—</span>
+      <button class="btn btn-sm btn-outline-secondary" id="btn-next">
+        次 <i class="bi bi-chevron-right"></i>
+      </button>
+    </div>
+
+  </div><!-- /right sidebar -->
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ═══════════════════════════════════════════════
+// アノテーションページ ロジック
+// Canvas 2D API によるバウンディングボックス & ポリゴン描画
+// ═══════════════════════════════════════════════
+
+// ── 状態管理 ─────────────────────────────────
+const state = {
+  project:      null,
+  images:       [],
+  currentIdx:   -1,
+  classes:      [],
+  selectedClass: 0,
+  annotations:  [],   // {class_id, class_name, type:"bbox"|"polygon", data:[...]}
+  tool:         "bbox",
+  drawing:      false,
+  startX: 0, startY: 0,
+  polyPoints:   [],   // ポリゴン描画中の点列
+  imgNatW: 1, imgNatH: 1,
+  canvasW: 1, canvasH: 1,
+};
+
+const canvas  = document.getElementById("annotation-canvas");
+const overlay = document.getElementById("anno-overlay");
+const ctx     = canvas.getContext("2d");
+const octx    = overlay.getContext("2d");
+
+// ── ツール切替 ─────────────────────────────────
+document.querySelectorAll('input[name="anno-tool"]').forEach(r => {
+  r.addEventListener("change", () => {
+    state.tool = r.value;
+    state.polyPoints = [];
+    state.drawing = false;
+    redraw();
+  });
+});
+
+// ── プロジェクト選択 ──────────────────────────
+document.getElementById("proj-select").addEventListener("change", async function() {
+  state.project = this.value || null;
+  if (!state.project) return;
+  await loadClasses();
+  await loadImages();
+});
+
+// ── 新規プロジェクト作成 ──────────────────────
+document.getElementById("btn-new-proj").addEventListener("click", async () => {
+  const name = document.getElementById("new-proj-name").value.trim();
+  if (!name) return;
+  const res  = await fetch("/api/projects/create", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({name})
+  });
+  const data = await res.json();
+  if (data.success) {
+    const sel = document.getElementById("proj-select");
+    const opt = document.createElement("option");
+    opt.value = name; opt.textContent = name; opt.selected = true;
+    sel.appendChild(opt);
+    state.project = name;
+    document.getElementById("new-proj-name").value = "";
+    await loadClasses();
+    await loadImages();
+  }
+});
+
+// ── 画像アップロード ──────────────────────────
+document.getElementById("btn-upload").addEventListener("click", async () => {
+  if (!state.project) { alert("プロジェクトを選択してください"); return; }
+  const files = document.getElementById("file-upload").files;
+  if (files.length === 0) return;
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  await fetch(`/api/projects/${state.project}/upload`, {method:"POST", body:fd});
+  await loadImages();
+});
+
+// ── 画像一覧ロード ────────────────────────────
+async function loadImages() {
+  const res  = await fetch(`/api/projects/${state.project}/images`);
+  const data = await res.json();
+  state.images = data.images || [];
+  state.currentIdx = state.images.length > 0 ? 0 : -1;
+
+  const listEl = document.getElementById("image-list");
+  listEl.innerHTML = "";
+  state.images.forEach((name, i) => {
+    const div = document.createElement("div");
+    div.className = "px-2 py-1 d-flex align-items-center gap-1";
+    div.style.cursor = "pointer";
+    div.innerHTML = `<i class="bi bi-image"></i> ${name}`;
+    div.addEventListener("click", () => selectImage(i));
+    listEl.appendChild(div);
+  });
+
+  if (state.currentIdx >= 0) selectImage(0);
+}
+
+// ── 画像を選択 ─────────────────────────────────
+async function selectImage(idx) {
+  if (idx < 0 || idx >= state.images.length) return;
+  state.currentIdx = idx;
+  const name = state.images[idx];
+  document.getElementById("img-index").textContent =
+    `${idx+1}/${state.images.length}`;
+
+  // 既存ラベルをロード
+  await loadLabel(name);
+
+  // 画像をキャンバスに描画
+  const img = new Image();
+  img.onload = () => {
+    state.imgNatW = img.naturalWidth;
+    state.imgNatH = img.naturalHeight;
+    resizeCanvas(img.naturalWidth, img.naturalHeight);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    document.getElementById("canvas-hint").style.display = "none";
+    redraw();
+  };
+  img.src = `/api/projects/${state.project}/image/${name}`;
+
+  // リスト内の選択状態を更新
+  document.querySelectorAll("#image-list > div").forEach((el, i) => {
+    el.style.background = i === idx ? "rgba(13,110,253,0.2)" : "";
+  });
+}
+
+// ── ラベルのロード ────────────────────────────
+async function loadLabel(imageName) {
+  state.annotations = [];
+  const res  = await fetch(`/api/projects/${state.project}/label/${imageName}`);
+  if (!res.ok) return;
+  const text = await res.text();
+  if (!text.trim()) return;
+
+  // YOLOフォーマット: class_id cx cy w h (正規化座標)
+  text.trim().split("\n").forEach(line => {
+    const parts = line.trim().split(" ").map(Number);
+    if (parts.length < 5) return;
+    const [cls_id, cx, cy, bw, bh] = parts;
+    state.annotations.push({
+      class_id:   cls_id,
+      class_name: state.classes[cls_id] || `class_${cls_id}`,
+      type:       "bbox",
+      data:       [cx, cy, bw, bh],   // 正規化座標のまま保持
+    });
+  });
+  updateAnnoList();
+}
+
+// ── ラベルの保存 ──────────────────────────────
+document.getElementById("btn-save-label").addEventListener("click", async () => {
+  if (!state.project || state.currentIdx < 0) return;
+  const imageName = state.images[state.currentIdx];
+
+  // YOLOフォーマットに変換
+  const lines = state.annotations.map(a => {
+    if (a.type === "bbox") {
+      return `${a.class_id} ${a.data.join(" ")}`;
+    } else {
+      // ポリゴン: class_id x1 y1 x2 y2 ...
+      return `${a.class_id} ${a.data.join(" ")}`;
+    }
+  });
+
+  await fetch(`/api/projects/${state.project}/label/${imageName}`, {
+    method: "POST",
+    body: lines.join("\n"),
+  });
+
+  // 保存フィードバック
+  const btn = document.getElementById("btn-save-label");
+  btn.textContent = "✓ 保存完了";
+  setTimeout(() => { btn.innerHTML = '<i class="bi bi-floppy"></i> ラベルを保存'; }, 1500);
+});
+
+// ── キャンバスリサイズ ─────────────────────────
+function resizeCanvas(natW, natH) {
+  const wrap = document.getElementById("annotation-wrap");
+  const maxW = wrap.clientWidth  - 10;
+  const maxH = wrap.clientHeight - 10;
+  const scale = Math.min(maxW / natW, maxH / natH);
+  canvas.width  = overlay.width  = state.canvasW = Math.round(natW * scale);
+  canvas.height = overlay.height = state.canvasH = Math.round(natH * scale);
+}
+
+// ── 座標変換: キャンバス座標 → 正規化座標 ───────
+function toNorm(cx, cy) {
+  return [cx / state.canvasW, cy / state.canvasH];
+}
+
+// ── 座標変換: 正規化座標 → キャンバス座標 ───────
+function fromNorm(nx, ny) {
+  return [nx * state.canvasW, ny * state.canvasH];
+}
+
+// ── マウスイベント ────────────────────────────
+function canvasXY(e) {
+  const r = canvas.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+overlay.addEventListener("mousedown", e => {
+  const [mx, my] = canvasXY(e);
+  if (state.tool === "bbox") {
+    state.drawing = true;
+    state.startX = mx; state.startY = my;
+  } else if (state.tool === "polygon") {
+    if (e.button === 2) {
+      // 右クリックでポリゴン確定
+      finishPolygon();
+    } else {
+      state.polyPoints.push(toNorm(mx, my));
+      drawOverlay();
+    }
+  }
+});
+
+overlay.addEventListener("mousemove", e => {
+  if (!state.drawing && state.tool !== "polygon") return;
+  const [mx, my] = canvasXY(e);
+  drawOverlay(mx, my);
+});
+
+overlay.addEventListener("mouseup", e => {
+  if (state.tool !== "bbox" || !state.drawing) return;
+  const [mx, my] = canvasXY(e);
+  state.drawing = false;
+
+  // バウンディングボックスをアノテーションに追加 (正規化座標)
+  const x1 = Math.min(state.startX, mx);
+  const y1 = Math.min(state.startY, my);
+  const x2 = Math.max(state.startX, mx);
+  const y2 = Math.max(state.startY, my);
+  if (x2 - x1 < 3 || y2 - y1 < 3) return;  // 誤クリック防止
+
+  const cx = (x1 + x2) / 2 / state.canvasW;
+  const cy = (y1 + y2) / 2 / state.canvasH;
+  const bw = (x2 - x1) / state.canvasW;
+  const bh = (y2 - y1) / state.canvasH;
+
+  state.annotations.push({
+    class_id:   state.selectedClass,
+    class_name: state.classes[state.selectedClass] || `class_${state.selectedClass}`,
+    type:       "bbox",
+    data:       [cx.toFixed(6), cy.toFixed(6), bw.toFixed(6), bh.toFixed(6)],
+  });
+  redraw();
+  updateAnnoList();
+});
+
+overlay.addEventListener("contextmenu", e => { e.preventDefault(); });
+
+function finishPolygon() {
+  if (state.polyPoints.length < 3) { state.polyPoints = []; redraw(); return; }
+  // ポリゴン座標を平坦化して保存
+  const flat = state.polyPoints.flatMap(([x,y]) => [x.toFixed(6), y.toFixed(6)]);
+  state.annotations.push({
+    class_id:   state.selectedClass,
+    class_name: state.classes[state.selectedClass] || `class_${state.selectedClass}`,
+    type:       "polygon",
+    data:       flat,
+  });
+  state.polyPoints = [];
+  redraw();
+  updateAnnoList();
+}
+
+// ── 描画関数 ──────────────────────────────────
+const COLORS = [
+  "#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6",
+  "#1abc9c","#e67e22","#34495e","#e91e63","#00bcd4",
+];
+
+function redraw() {
+  // 下レイヤー: 確定済みアノテーション
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 画像の再描画は img.onload 内で処理済みのため、
+  // ここでは確定アノテーションのみ描画する
+  state.annotations.forEach((a, i) => {
+    const color = COLORS[a.class_id % COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.fillStyle   = color + "40";
+    ctx.lineWidth   = 2;
+
+    if (a.type === "bbox") {
+      const [cx, cy, bw, bh] = a.data.map(Number);
+      const [px, py] = fromNorm(cx - bw/2, cy - bh/2);
+      const [pw, ph] = [bw * state.canvasW, bh * state.canvasH];
+      ctx.strokeRect(px, py, pw, ph);
+      ctx.fillRect(px, py, pw, ph);
+      ctx.fillStyle = color;
+      ctx.font = "11px sans-serif";
+      ctx.fillText(a.class_name, px + 2, py - 3);
+    } else if (a.type === "polygon") {
+      const pts = [];
+      for (let i = 0; i < a.data.length; i += 2) {
+        pts.push(fromNorm(Number(a.data[i]), Number(a.data[i+1])));
+      }
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      pts.slice(1).forEach(([x,y]) => ctx.lineTo(x, y));
+      ctx.closePath();
+      ctx.stroke(); ctx.fill();
+      ctx.fillStyle = color;
+      ctx.font = "11px sans-serif";
+      ctx.fillText(a.class_name, pts[0][0] + 2, pts[0][1] - 3);
+    }
+  });
+
+  // 上レイヤーをクリア
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+}
+
+function drawOverlay(mouseX, mouseY) {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  const color = COLORS[state.selectedClass % COLORS.length];
+
+  if (state.tool === "bbox" && state.drawing && mouseX !== undefined) {
+    const x1 = Math.min(state.startX, mouseX);
+    const y1 = Math.min(state.startY, mouseY);
+    const w  = Math.abs(mouseX - state.startX);
+    const h  = Math.abs(mouseY - state.startY);
+    octx.strokeStyle = color;
+    octx.fillStyle   = color + "30";
+    octx.lineWidth = 2;
+    octx.strokeRect(x1, y1, w, h);
+    octx.fillRect(x1, y1, w, h);
+  } else if (state.tool === "polygon") {
+    // ポリゴン描画中の点とライン
+    if (state.polyPoints.length === 0) return;
+    const pts = state.polyPoints.map(([nx,ny]) => fromNorm(nx, ny));
+    octx.strokeStyle = color;
+    octx.lineWidth = 2;
+    octx.beginPath();
+    octx.moveTo(pts[0][0], pts[0][1]);
+    pts.slice(1).forEach(([x,y]) => octx.lineTo(x,y));
+    if (mouseX !== undefined) octx.lineTo(mouseX, mouseY);
+    octx.stroke();
+    // 各点に円を描く
+    pts.forEach(([x,y]) => {
+      octx.beginPath();
+      octx.arc(x, y, 4, 0, 2*Math.PI);
+      octx.fillStyle = color;
+      octx.fill();
+    });
+  }
+}
+
+// ── アノテーション一覧更新 ────────────────────
+function updateAnnoList() {
+  const el = document.getElementById("anno-list");
+  if (state.annotations.length === 0) {
+    el.innerHTML = '<div class="text-muted p-2">アノテーションなし</div>';
+    return;
+  }
+  el.innerHTML = state.annotations.map((a, i) => {
+    const color = COLORS[a.class_id % COLORS.length];
+    return `<div class="px-2 py-1 d-flex justify-content-between align-items-center">
+      <span>
+        <span style="display:inline-block;width:10px;height:10px;background:${color};border-radius:2px;margin-right:4px"></span>
+        <small>${a.class_name} (${a.type})</small>
+      </span>
+      <button class="btn btn-xs btn-sm btn-outline-danger py-0 px-1"
+              onclick="deleteAnno(${i})">✕</button>
+    </div>`;
+  }).join("");
+}
+
+function deleteAnno(idx) {
+  state.annotations.splice(idx, 1);
+  redraw();
+  updateAnnoList();
+}
+
+// ── 最後を削除 ────────────────────────────────
+document.getElementById("btn-del-last").addEventListener("click", () => {
+  if (state.annotations.length > 0) {
+    state.annotations.pop();
+    redraw(); updateAnnoList();
+  }
+});
+
+// ── 全削除 ────────────────────────────────────
+document.getElementById("btn-clear-all").addEventListener("click", () => {
+  if (!confirm("全アノテーションを削除しますか？")) return;
+  state.annotations = [];
+  redraw(); updateAnnoList();
+});
+
+// ── クラス管理 ────────────────────────────────
+async function loadClasses() {
+  const res  = await fetch(`/api/projects/${state.project}/classes`);
+  const data = await res.json();
+  state.classes = data.classes || [];
+  state.selectedClass = 0;
+  renderClassList();
+}
+
+function renderClassList() {
+  const el = document.getElementById("class-list");
+  el.innerHTML = state.classes.map((cls, i) => {
+    const color = COLORS[i % COLORS.length];
+    return `<div class="d-flex align-items-center gap-1 px-1 py-1"
+                 style="cursor:pointer;background:${i===state.selectedClass?'rgba(13,110,253,0.15)':''};border-radius:4px"
+                 onclick="selectClass(${i})">
+      <span style="display:inline-block;width:12px;height:12px;background:${color};border-radius:2px;flex-shrink:0"></span>
+      <small class="flex-grow-1">${i}: ${cls}</small>
+      <button class="btn btn-xs btn-sm py-0 px-1 btn-outline-danger"
+              onclick="event.stopPropagation();deleteClass(${i})">✕</button>
+    </div>`;
+  }).join("") || '<div class="text-muted p-2 small">クラスなし</div>';
+}
+
+function selectClass(i) {
+  state.selectedClass = i;
+  renderClassList();
+}
+
+document.getElementById("btn-add-class").addEventListener("click", async () => {
+  const name = document.getElementById("new-class-name").value.trim();
+  if (!name || !state.project) return;
+  state.classes.push(name);
+  await saveClasses();
+  document.getElementById("new-class-name").value = "";
+  renderClassList();
+});
+
+async function deleteClass(i) {
+  state.classes.splice(i, 1);
+  if (state.selectedClass >= state.classes.length)
+    state.selectedClass = Math.max(0, state.classes.length - 1);
+  await saveClasses();
+  renderClassList();
+}
+
+async function saveClasses() {
+  await fetch(`/api/projects/${state.project}/classes`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({classes: state.classes})
+  });
+}
+
+// ── ナビゲーション ────────────────────────────
+document.getElementById("btn-prev").addEventListener("click", () => {
+  if (state.currentIdx > 0) selectImage(state.currentIdx - 1);
+});
+document.getElementById("btn-next").addEventListener("click", () => {
+  if (state.currentIdx < state.images.length - 1) selectImage(state.currentIdx + 1);
+});
+
+// ── キーボードショートカット ──────────────────
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft")  document.getElementById("btn-prev").click();
+  if (e.key === "ArrowRight") document.getElementById("btn-next").click();
+  if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    document.getElementById("btn-save-label").click();
+  }
+  // 数字キーでクラス選択
+  const num = parseInt(e.key);
+  if (!isNaN(num) && num < state.classes.length) { selectClass(num); }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}設定 — BILT+YOLO Studio{% endblock %}
+
+{% block body %}
+<div class="container-fluid py-3" style="max-width:700px">
+
+  <h5 class="fw-bold mb-3"><i class="bi bi-gear"></i> アプリケーション設定</h5>
+
+  <!-- サービス状態 -->
+  <div class="card mb-3">
+    <div class="card-header fw-semibold small">バックエンドサービス状態</div>
+    <div class="card-body">
+      <table class="table table-sm table-borderless mb-0">
+        <tr>
+          <td>BILTサービス (port 5101)</td>
+          <td><span id="cfg-bilt-badge" class="badge bg-secondary">確認中...</span></td>
+        </tr>
+        <tr>
+          <td>YOLOサービス (port 5102)</td>
+          <td><span id="cfg-yolo-badge" class="badge bg-secondary">確認中...</span></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ポート設定 (情報表示のみ) -->
+  <div class="card mb-3">
+    <div class="card-header fw-semibold small">ポート設定</div>
+    <div class="card-body small">
+      <p class="text-muted mb-2">
+        ポートは環境変数で変更できます。変更後はアプリを再起動してください。
+      </p>
+      <table class="table table-sm table-borderless mb-0">
+        <tr><td class="text-muted">UIサーバー</td>
+            <td><code>STUDIO_UI_PORT</code> (デフォルト: 5100)</td></tr>
+        <tr><td class="text-muted">BILTサービス</td>
+            <td><code>BILT_SERVICE_PORT</code> (デフォルト: 5101)</td></tr>
+        <tr><td class="text-muted">YOLOサービス</td>
+            <td><code>YOLO_SERVICE_PORT</code> (デフォルト: 5102)</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ライセンス情報 -->
+  <div class="card mb-3">
+    <div class="card-header fw-semibold small">ライセンス構成</div>
+    <div class="card-body small">
+      <table class="table table-sm table-borderless mb-0">
+        <tr>
+          <td><span class="badge bg-info">UIプロセス</span></td>
+          <td>PySide6 — <strong>LGPL 3.0</strong></td>
+        </tr>
+        <tr>
+          <td><span class="badge bg-warning text-dark">BILTサービス</span></td>
+          <td>BILT — <strong>AGPL 3.0</strong> (HTTPで分離)</td>
+        </tr>
+        <tr>
+          <td><span class="badge bg-warning text-dark">YOLOサービス</span></td>
+          <td>Ultralytics — <strong>AGPL 3.0</strong> (HTTPで分離)</td>
+        </tr>
+      </table>
+      <p class="text-muted mt-2 mb-0">
+        AGPL コードはHTTPバウンダリで分離されており、
+        UIプロセスに静的リンクされません。
+      </p>
+    </div>
+  </div>
+
+  <!-- バージョン情報 -->
+  <div class="card">
+    <div class="card-header fw-semibold small">バージョン情報</div>
+    <div class="card-body small">
+      <div id="version-info" class="text-muted">読み込み中...</div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadSettings() {
+  const res  = await fetch("/api/health");
+  const data = await res.json();
+
+  const set = (id, ok) => {
+    const el = document.getElementById(id);
+    el.className = "badge " + (ok ? "bg-success" : "bg-danger");
+    el.textContent = ok ? "稼働中 ✓" : "停止 ✗";
+  };
+  set("cfg-bilt-badge", data.bilt);
+  set("cfg-yolo-badge", data.yolo);
+
+  document.getElementById("version-info").innerHTML =
+    `BILT+YOLO Studio v1.0.0<br>Python / Flask / PySide6 / Bootstrap 5`;
+}
+loadSettings();
+</script>
+{% endblock %}

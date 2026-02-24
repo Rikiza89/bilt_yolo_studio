@@ -1,0 +1,21 @@
+# BILT+YOLO Studio 依存関係
+# pip install -r requirements.txt でインストール
+
+# ─── UI プロセス (LGPL) ───────────────────────
+PySide6>=6.6.0                 # デスクトップシェル (LGPL 3.0)
+PySide6-WebEngine>=6.6.0       # QWebEngineView (LGPL 3.0)
+
+# ─── Flask UIサーバー ─────────────────────────
+Flask>=3.0.0                   # Web UIサーバー
+Werkzeug>=3.0.0                # Flask の WSGI 基盤
+
+# ─── 共有レイヤー ────────────────────────────
+requests>=2.31.0               # サービスクライアント (HTTP通信)
+
+# ─── バックエンドサービス (各サービスのプロセスにインストール) ──
+# 以下は AGPL サービスプロセス側にのみ必要
+# bilt                          # AGPL 3.0
+# ultralytics>=8.0.0            # AGPL 3.0
+# opencv-python>=4.8.0          # Apache 2.0
+# numpy>=1.24.0                 # BSD
+# Pillow>=10.0.0                # HPND

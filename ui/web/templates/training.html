@@ -1,0 +1,378 @@
+{% extends "base.html" %}
+{% block title %}トレーニング — BILT+YOLO Studio{% endblock %}
+
+{% block body %}
+<div class="d-flex h-100" style="overflow-y:auto">
+<div class="container-fluid py-3">
+<div class="row g-3">
+
+  <!-- ─── 左カラム: トレーニング設定 ─── -->
+  <div class="col-md-5">
+
+    <!-- エンジン選択 -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold small">エンジン & タスク</div>
+      <div class="card-body">
+        <div class="btn-group w-100 mb-2" role="group">
+          <input type="radio" class="btn-check" name="train-engine" id="te-bilt" value="bilt" checked>
+          <label class="btn btn-outline-primary btn-sm" for="te-bilt">BILT</label>
+          <input type="radio" class="btn-check" name="train-engine" id="te-yolo" value="yolo">
+          <label class="btn btn-outline-primary btn-sm" for="te-yolo">YOLO</label>
+        </div>
+        <div id="yolo-task-row" style="display:none">
+          <select class="form-select form-select-sm" id="train-task">
+            <option value="detect">Detection</option>
+            <option value="segment">Segmentation</option>
+            <option value="obb">OBB</option>
+            <option value="pose">Pose</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- データセット設定 -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold small">データセット</div>
+      <div class="card-body">
+        <label class="form-label small">プロジェクト</label>
+        <select class="form-select form-select-sm mb-2" id="train-project">
+          <option value="">— 選択 —</option>
+          {% for p in projects %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+
+        <label class="form-label small">data.yaml パス</label>
+        <div class="input-group input-group-sm">
+          <input type="text" class="form-control" id="data-yaml" placeholder="data.yaml へのパス">
+          <button class="btn btn-outline-secondary" id="btn-gen-yaml">生成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ハイパーパラメータ -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold small">ハイパーパラメータ</div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label small">エポック数</label>
+            <input type="number" class="form-control form-control-sm" id="hp-epochs" value="100" min="1">
+          </div>
+          <div class="col-6">
+            <label class="form-label small">バッチサイズ</label>
+            <input type="number" class="form-control form-control-sm" id="hp-batch" value="8" min="1">
+          </div>
+          <div class="col-6">
+            <label class="form-label small">画像サイズ</label>
+            <input type="number" class="form-control form-control-sm" id="hp-imgsize" value="640">
+          </div>
+          <div class="col-6">
+            <label class="form-label small">学習率</label>
+            <input type="number" class="form-control form-control-sm" id="hp-lr" value="0.001" step="0.0001">
+          </div>
+          <div class="col-6">
+            <label class="form-label small">ベースモデル</label>
+            <select class="form-select form-select-sm" id="hp-basemodel">
+              <option value="scratch">Scratch</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label small">デバイス</label>
+            <select class="form-select form-select-sm" id="hp-device">
+              <option value="cpu">CPU</option>
+              <option value="0">GPU 0</option>
+              <option value="cuda">CUDA (auto)</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label small">保存モデル名</label>
+            <input type="text" class="form-control form-control-sm" id="hp-savename"
+                   placeholder="省略時は自動命名">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- アクションボタン -->
+    <div class="d-flex flex-column gap-2">
+      <button class="btn btn-success" id="btn-train">
+        <i class="bi bi-play-fill"></i> トレーニング開始
+      </button>
+      <button class="btn btn-outline-primary" id="btn-autotrain">
+        <i class="bi bi-magic"></i> オートトレーニング (自動ラベリング → 学習)
+      </button>
+      <button class="btn btn-outline-secondary" id="btn-relabel">
+        <i class="bi bi-tag"></i> 再ラベリングのみ
+      </button>
+    </div>
+
+  </div><!-- /left col -->
+
+  <!-- ─── 右カラム: ステータス & ログ ─── -->
+  <div class="col-md-7">
+
+    <!-- ステータスカード -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold small d-flex justify-content-between">
+        トレーニング状況
+        <span id="train-status-badge" class="badge bg-secondary">待機中</span>
+      </div>
+      <div class="card-body">
+        <div class="row g-2 mb-2">
+          <div class="col-4 text-center">
+            <div class="text-muted small">エポック</div>
+            <div id="stat-epoch" class="fs-5 fw-bold">—</div>
+          </div>
+          <div class="col-4 text-center">
+            <div class="text-muted small">損失</div>
+            <div id="stat-loss" class="fs-5 fw-bold">—</div>
+          </div>
+          <div class="col-4 text-center">
+            <div class="text-muted small">mAP</div>
+            <div id="stat-map" class="fs-5 fw-bold">—</div>
+          </div>
+        </div>
+        <div class="progress mb-1" style="height:6px">
+          <div class="progress-bar progress-bar-striped progress-bar-animated"
+               id="train-progress" role="progressbar" style="width:0%"></div>
+        </div>
+        <div id="train-phase" class="small text-muted">—</div>
+      </div>
+    </div>
+
+    <!-- オートトレーニング状況 -->
+    <div class="card mb-3" id="autotrain-card" style="display:none">
+      <div class="card-header fw-semibold small">オートトレーニング状況</div>
+      <div class="card-body small">
+        <div id="autotrain-status" class="text-muted">—</div>
+      </div>
+    </div>
+
+    <!-- トレーニングログ -->
+    <div class="card">
+      <div class="card-header fw-semibold small d-flex justify-content-between">
+        ログ
+        <button class="btn btn-xs btn-sm btn-outline-secondary py-0" id="btn-clear-log">
+          クリア
+        </button>
+      </div>
+      <div class="card-body p-1">
+        <div class="train-log" id="train-log">
+          <div class="text-muted">— ログなし —</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /right col -->
+
+</div><!-- /row -->
+</div><!-- /container -->
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ═══════════════════════════════════════════════
+// トレーニングページ ロジック
+// ═══════════════════════════════════════════════
+
+let _trainEngine = "bilt";
+let _pollTimer   = null;
+
+// ── エンジン切替 ───────────────────────────────
+document.querySelectorAll('input[name="train-engine"]').forEach(r => {
+  r.addEventListener("change", () => {
+    _trainEngine = r.value;
+    document.getElementById("yolo-task-row").style.display =
+      _trainEngine === "yolo" ? "block" : "none";
+    loadBaseModels();
+  });
+});
+
+// ── ベースモデル一覧ロード ────────────────────
+async function loadBaseModels() {
+  const res  = await fetch("/api/models/available", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _trainEngine})
+  });
+  const data = await res.json();
+  const sel  = document.getElementById("hp-basemodel");
+  sel.innerHTML = '<option value="scratch">Scratch</option>';
+  (data.models || []).forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m; opt.textContent = m;
+    sel.appendChild(opt);
+  });
+}
+
+// ── data.yaml 生成 ────────────────────────────
+document.getElementById("btn-gen-yaml").addEventListener("click", async () => {
+  const proj = document.getElementById("train-project").value;
+  if (!proj) { alert("プロジェクトを選択してください"); return; }
+
+  // クラス一覧を取得
+  const res   = await fetch(`/api/projects/${proj}/classes`);
+  const cdata = await res.json();
+  const classes = cdata.classes || [];
+
+  // シンプルな data.yaml を生成してサーバーに保存
+  const yaml = [
+    `path: ./projects/${proj}`,
+    `train: images`,
+    `val: images`,
+    `nc: ${classes.length}`,
+    `names: [${classes.map(c => `'${c}'`).join(", ")}]`,
+  ].join("\n");
+
+  // ダウンロード用ブロブを生成
+  const blob = new Blob([yaml], {type:"text/plain"});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = `${proj}_data.yaml`; a.click();
+  URL.revokeObjectURL(url);
+
+  document.getElementById("data-yaml").value = `./projects/${proj}/data.yaml`;
+  appendLog(`data.yaml を生成しました (クラス数: ${classes.length})`);
+});
+
+// ── トレーニング開始 ──────────────────────────
+document.getElementById("btn-train").addEventListener("click", async () => {
+  const config = buildConfig();
+  if (!config) return;
+  const res  = await fetch("/api/train/start", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(config)
+  });
+  const data = await res.json();
+  if (data.success || data.started) {
+    appendLog("トレーニング開始...");
+    startPoll("train");
+  } else {
+    appendLog(`エラー: ${data.error || "不明"}`);
+  }
+});
+
+// ── オートトレーニング開始 ───────────────────
+document.getElementById("btn-autotrain").addEventListener("click", async () => {
+  const config = buildConfig();
+  if (!config) return;
+  document.getElementById("autotrain-card").style.display = "block";
+  const res  = await fetch("/api/autotrain/start", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(config)
+  });
+  const data = await res.json();
+  if (data.success || data.started) {
+    appendLog("オートトレーニング開始...");
+    startPoll("autotrain");
+  } else {
+    appendLog(`エラー: ${data.error || "不明"}`);
+  }
+});
+
+// ── 再ラベリング ──────────────────────────────
+document.getElementById("btn-relabel").addEventListener("click", async () => {
+  const config = buildConfig();
+  if (!config) return;
+  const res  = await fetch("/api/relabel/start", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(config)
+  });
+  const data = await res.json();
+  appendLog(data.success ? "再ラベリング開始..." : `エラー: ${data.error}`);
+});
+
+// ── 設定オブジェクト生成 ──────────────────────
+function buildConfig() {
+  const dataYaml = document.getElementById("data-yaml").value.trim();
+  if (!dataYaml) { alert("data.yaml のパスを指定してください"); return null; }
+  return {
+    engine:           _trainEngine,
+    task_type:        document.getElementById("train-task").value,
+    data_yaml:        dataYaml,
+    project_path:     `./projects/${document.getElementById("train-project").value}`,
+    model_name:       document.getElementById("hp-basemodel").value,
+    custom_save_name: document.getElementById("hp-savename").value.trim() || null,
+    epochs:           parseInt(document.getElementById("hp-epochs").value),
+    batch_size:       parseInt(document.getElementById("hp-batch").value),
+    img_size:         parseInt(document.getElementById("hp-imgsize").value),
+    learning_rate:    parseFloat(document.getElementById("hp-lr").value),
+    device:           document.getElementById("hp-device").value,
+  };
+}
+
+// ── ステータスポーリング ──────────────────────
+function startPoll(mode) {
+  if (_pollTimer) clearInterval(_pollTimer);
+  _pollTimer = setInterval(() => pollStatus(mode), 1500);
+}
+
+async function pollStatus(mode) {
+  const endpoint = mode === "train" ? "/api/train/status" : "/api/autotrain/status";
+  const res      = await fetch(`${endpoint}?engine=${_trainEngine}`);
+  const data     = await res.json();
+
+  if (mode === "train") {
+    updateTrainUI(data);
+  } else {
+    document.getElementById("autotrain-status").textContent =
+      data.phase || data.status || JSON.stringify(data);
+    if (data.train_status) updateTrainUI(data.train_status);
+  }
+
+  // 完了または失敗でポーリング停止
+  if (data.status === "idle" || data.status === "done" || data.status === "error") {
+    clearInterval(_pollTimer);
+    _pollTimer = null;
+    appendLog(`完了: ${data.status}`);
+  }
+}
+
+function updateTrainUI(data) {
+  const statusBadge  = document.getElementById("train-status-badge");
+  const progressBar  = document.getElementById("train-progress");
+  const statusColors = {running:"bg-primary",done:"bg-success",error:"bg-danger",idle:"bg-secondary"};
+  const status       = data.status || "idle";
+
+  statusBadge.className = `badge ${statusColors[status] || "bg-secondary"}`;
+  statusBadge.textContent = {running:"実行中",done:"完了",error:"エラー",idle:"待機中"}[status] || status;
+
+  document.getElementById("stat-epoch").textContent  = data.epoch  ? `${data.epoch}/${data.total_epochs}` : "—";
+  document.getElementById("stat-loss").textContent   = data.loss   ? parseFloat(data.loss).toFixed(4) : "—";
+  document.getElementById("stat-map").textContent    = data.map50  ? parseFloat(data.map50).toFixed(3) : "—";
+  document.getElementById("train-phase").textContent = data.phase  || "—";
+
+  if (data.epoch && data.total_epochs) {
+    const pct = (data.epoch / data.total_epochs * 100).toFixed(0);
+    progressBar.style.width = `${pct}%`;
+  }
+
+  if (data.log_line) appendLog(data.log_line);
+}
+
+// ── ログ出力 ──────────────────────────────────
+function appendLog(msg) {
+  const el = document.getElementById("train-log");
+  if (el.querySelector(".text-muted")?.textContent === "— ログなし —") {
+    el.innerHTML = "";
+  }
+  const line = document.createElement("div");
+  const ts   = new Date().toLocaleTimeString("ja-JP");
+  line.textContent = `[${ts}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+document.getElementById("btn-clear-log").addEventListener("click", () => {
+  document.getElementById("train-log").innerHTML = '<div class="text-muted">— ログなし —</div>';
+});
+
+// ── 初期化 ────────────────────────────────────
+loadBaseModels();
+</script>
+{% endblock %}

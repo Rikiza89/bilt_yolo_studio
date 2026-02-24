@@ -1,0 +1,397 @@
+{% extends "base.html" %}
+{% block title %}検出 — BILT+YOLO Studio{% endblock %}
+
+{% block body %}
+<div class="d-flex h-100">
+
+  <!-- ─── 左サイドバー: コントロールパネル ─── -->
+  <div class="sidebar d-flex flex-column gap-2">
+
+    <!-- エンジン選択 -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">エンジン</label>
+      <div class="btn-group w-100" role="group">
+        <input type="radio" class="btn-check" name="engine" id="eng-bilt" value="bilt" checked>
+        <label class="btn btn-outline-primary btn-sm" for="eng-bilt">BILT</label>
+        <input type="radio" class="btn-check" name="engine" id="eng-yolo" value="yolo">
+        <label class="btn btn-outline-primary btn-sm" for="eng-yolo">YOLO</label>
+      </div>
+    </div>
+
+    <!-- モデル選択 -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">モデル</label>
+      <select class="form-select form-select-sm" id="model-select">
+        <option value="">— モデルを選択 —</option>
+      </select>
+      <button class="btn btn-sm btn-outline-secondary w-100 mt-1" id="btn-load-model">
+        <i class="bi bi-box-arrow-in-down"></i> ロード
+      </button>
+      <div id="model-info" class="small text-muted mt-1"></div>
+    </div>
+
+    <!-- タスク選択 (YOLO専用) -->
+    <div id="task-row" style="display:none">
+      <label class="form-label fw-semibold small mb-1">タスク (YOLO)</label>
+      <select class="form-select form-select-sm" id="task-select">
+        <option value="detect">検出 (detect)</option>
+        <option value="segment">セグメント (segment)</option>
+        <option value="obb">OBB</option>
+        <option value="pose">ポーズ (pose)</option>
+      </select>
+    </div>
+
+    <!-- カメラ選択 -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">カメラ</label>
+      <select class="form-select form-select-sm" id="camera-select"></select>
+      <div class="d-flex gap-1 mt-1">
+        <select class="form-select form-select-sm" id="res-select">
+          <option value="1280x960">1280×960</option>
+          <option value="1920x1080">1920×1080</option>
+          <option value="640x480">640×480</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" id="btn-set-res">
+          <i class="bi bi-aspect-ratio"></i>
+        </button>
+      </div>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- 信頼度・IOU スライダー -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">
+        信頼度閾値: <span id="conf-val">0.60</span>
+      </label>
+      <input type="range" class="form-range" id="slider-conf"
+             min="0.1" max="1.0" step="0.05" value="0.60">
+    </div>
+    <div>
+      <label class="form-label fw-semibold small mb-1">
+        IOU閾値: <span id="iou-val">0.10</span>
+      </label>
+      <input type="range" class="form-range" id="slider-iou"
+             min="0.05" max="1.0" step="0.05" value="0.10">
+    </div>
+    <div>
+      <label class="form-label fw-semibold small mb-1">
+        最大検出数: <span id="maxdet-val">10</span>
+      </label>
+      <input type="range" class="form-range" id="slider-maxdet"
+             min="1" max="100" step="1" value="10">
+    </div>
+
+    <hr class="my-1">
+
+    <!-- モード切替 -->
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="chk-counter">
+      <label class="form-check-label small" for="chk-counter">カウンターモード</label>
+    </div>
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="chk-save">
+      <label class="form-check-label small" for="chk-save">画像を保存</label>
+    </div>
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="chk-dataset">
+      <label class="form-check-label small" for="chk-dataset">データセットキャプチャ</label>
+    </div>
+
+    <!-- プロジェクト (データセットキャプチャ用) -->
+    <div id="project-row" style="display:none">
+      <label class="form-label small mb-1">保存先プロジェクト</label>
+      <select class="form-select form-select-sm" id="proj-select">
+        <option value="">— 選択 —</option>
+      </select>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- 検出開始/停止 -->
+    <button class="btn btn-success btn-sm w-100" id="btn-start">
+      <i class="bi bi-play-fill"></i> 検出開始
+    </button>
+    <button class="btn btn-danger btn-sm w-100" id="btn-stop" disabled>
+      <i class="bi bi-stop-fill"></i> 停止
+    </button>
+
+  </div><!-- /sidebar -->
+
+  <!-- ─── 中央: ビデオ表示エリア ─── -->
+  <div id="video-wrap">
+    <img id="video-canvas" src="/api/frame/latest?engine=bilt&t=0" alt="frame">
+  </div>
+
+  <!-- ─── 右サイドバー: 統計・カウンター ─── -->
+  <div class="sidebar border-left d-flex flex-column gap-2" style="border-left: 1px solid var(--bs-border-color); border-right: none;">
+
+    <!-- FPS / 検出数 -->
+    <div>
+      <div class="fw-semibold small mb-1">ライブ統計</div>
+      <table class="table table-sm table-borderless mb-0 small">
+        <tr><td class="text-muted">FPS</td>
+            <td id="stat-fps" class="text-end fw-bold">—</td></tr>
+        <tr><td class="text-muted">検出数/フレーム</td>
+            <td id="stat-det" class="text-end fw-bold">—</td></tr>
+        <tr><td class="text-muted">累計検出数</td>
+            <td id="stat-total" class="text-end fw-bold">—</td></tr>
+      </table>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- カウンター -->
+    <div>
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <span class="fw-semibold small">カウンター</span>
+        <button class="btn btn-xs btn-outline-secondary btn-sm py-0" id="btn-reset-cnt">
+          <i class="bi bi-arrow-counterclockwise"></i> リセット
+        </button>
+      </div>
+      <div id="counter-list" class="small text-muted">— データなし —</div>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- 現在の検出クラス -->
+    <div>
+      <div class="fw-semibold small mb-1">現在の検出</div>
+      <div id="detection-list" class="small text-muted">— 停止中 —</div>
+    </div>
+
+  </div><!-- /right sidebar -->
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ═══════════════════════════════════════════════
+// 検出ページ ロジック
+// ═══════════════════════════════════════════════
+
+let _engine    = "bilt";
+let _running   = false;
+let _frameLoop = null;  // フレームポーリングタイマー
+let _statsLoop = null;  // 統計ポーリングタイマー
+
+// ── エンジン切替 ───────────────────────────────
+document.querySelectorAll('input[name="engine"]').forEach(r => {
+  r.addEventListener("change", () => {
+    _engine = r.value;
+    // YOLO専用UI要素の表示制御
+    document.getElementById("task-row").style.display =
+      _engine === "yolo" ? "block" : "none";
+    loadModels();
+    loadCameras();
+  });
+});
+
+// ── モデル一覧ロード ──────────────────────────
+async function loadModels() {
+  const res  = await fetch("/api/models/available", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine})
+  });
+  const data = await res.json();
+  const sel  = document.getElementById("model-select");
+  sel.innerHTML = '<option value="">— モデルを選択 —</option>';
+  (data.models || []).forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m; opt.textContent = m;
+    sel.appendChild(opt);
+  });
+}
+
+// ── モデルロード ──────────────────────────────
+document.getElementById("btn-load-model").addEventListener("click", async () => {
+  const model = document.getElementById("model-select").value;
+  const task  = document.getElementById("task-select").value;
+  if (!model) return;
+  const res  = await fetch("/api/model/load", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, model_name: model, task_type: task})
+  });
+  const data = await res.json();
+  document.getElementById("model-info").textContent =
+    data.success ? `✓ ${model} ロード済み` : "✗ ロード失敗";
+});
+
+// ── カメラ一覧ロード ──────────────────────────
+async function loadCameras() {
+  const res  = await fetch(`/api/cameras?engine=${_engine}`);
+  const data = await res.json();
+  const sel  = document.getElementById("camera-select");
+  sel.innerHTML = "";
+  (data.cameras || []).forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c.index; opt.textContent = `カメラ ${c.index} (${c.width}x${c.height})`;
+    sel.appendChild(opt);
+  });
+}
+
+// ── 解像度設定 ─────────────────────────────────
+document.getElementById("btn-set-res").addEventListener("click", async () => {
+  const [w, h] = document.getElementById("res-select").value.split("x").map(Number);
+  await fetch("/api/camera/resolution", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, width: w, height: h})
+  });
+});
+
+// ── スライダー同期 ────────────────────────────
+["conf","iou","maxdet"].forEach(name => {
+  const slider = document.getElementById(`slider-${name}`);
+  const label  = document.getElementById(`${name}-val`);
+  slider.addEventListener("input", () => { label.textContent = slider.value; });
+});
+
+// ── データセットキャプチャ切替 ────────────────
+document.getElementById("chk-dataset").addEventListener("change", function() {
+  document.getElementById("project-row").style.display = this.checked ? "block" : "none";
+});
+
+// ── プロジェクト一覧ロード ────────────────────
+async function loadProjects() {
+  const res  = await fetch("/api/projects");
+  const data = await res.json();
+  const sel  = document.getElementById("proj-select");
+  sel.innerHTML = '<option value="">— 選択 —</option>';
+  (data.projects || []).forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p; opt.textContent = p;
+    sel.appendChild(opt);
+  });
+}
+
+// ── 検出開始 ──────────────────────────────────
+document.getElementById("btn-start").addEventListener("click", async () => {
+  const settings = {
+    engine:          _engine,
+    conf:            parseFloat(document.getElementById("slider-conf").value),
+    iou:             parseFloat(document.getElementById("slider-iou").value),
+    max_det:         parseInt(document.getElementById("slider-maxdet").value),
+    counter_mode:    document.getElementById("chk-counter").checked,
+    save_images:     document.getElementById("chk-save").checked,
+    dataset_capture: document.getElementById("chk-dataset").checked,
+    project_folder:  document.getElementById("proj-select").value,
+    chain_mode:      false,
+  };
+  const camera_idx = parseInt(document.getElementById("camera-select").value || "0");
+  // カメラ選択を先に送る
+  await fetch("/api/camera/select", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, index: camera_idx})
+  });
+  // 設定を更新してから開始
+  await fetch("/api/detection/settings", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(settings)
+  });
+  const res  = await fetch("/api/detection/start", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine})
+  });
+  const data = await res.json();
+  if (data.success) {
+    _running = true;
+    document.getElementById("btn-start").disabled = true;
+    document.getElementById("btn-stop").disabled  = false;
+    startPolling();
+  }
+});
+
+// ── 検出停止 ──────────────────────────────────
+document.getElementById("btn-stop").addEventListener("click", async () => {
+  await fetch("/api/detection/stop", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine})
+  });
+  _running = false;
+  document.getElementById("btn-start").disabled = false;
+  document.getElementById("btn-stop").disabled  = true;
+  stopPolling();
+});
+
+// ── フレーム & 統計ポーリング ─────────────────
+function startPolling() {
+  // 30fps相当でフレームを更新
+  _frameLoop = setInterval(refreshFrame, 33);
+  _statsLoop = setInterval(refreshStats, 500);
+}
+
+function stopPolling() {
+  clearInterval(_frameLoop);
+  clearInterval(_statsLoop);
+  document.getElementById("detection-list").textContent = "— 停止中 —";
+}
+
+function refreshFrame() {
+  const img = document.getElementById("video-canvas");
+  // キャッシュ回避のためタイムスタンプをパラメータに付加
+  img.src = `/api/frame/latest?engine=${_engine}&t=${Date.now()}`;
+}
+
+async function refreshStats() {
+  try {
+    const res  = await fetch(`/api/detection/stats?engine=${_engine}`);
+    const data = await res.json();
+    document.getElementById("stat-fps").textContent   = (data.fps || 0).toFixed(1);
+    document.getElementById("stat-det").textContent   = data.detections_per_frame || 0;
+    document.getElementById("stat-total").textContent = data.total_detections || 0;
+
+    // 検出中クラス表示
+    const dlist = document.getElementById("detection-list");
+    if (data.current_classes && data.current_classes.length > 0) {
+      dlist.innerHTML = data.current_classes
+        .map(c => `<span class="badge bg-secondary me-1 mb-1">${c}</span>`)
+        .join("");
+    } else {
+      dlist.textContent = "— 検出なし —";
+    }
+
+    // カウンター表示
+    await refreshCounters();
+  } catch { /* ポーリングエラーは無視 */ }
+}
+
+async function refreshCounters() {
+  const res  = await fetch(`/api/counters?engine=${_engine}`);
+  const data = await res.json();
+  const el   = document.getElementById("counter-list");
+  const counters = data.counters || {};
+  if (Object.keys(counters).length === 0) {
+    el.textContent = "— データなし —"; return;
+  }
+  el.innerHTML = Object.entries(counters)
+    .map(([cls, cnt]) => `<div class="d-flex justify-content-between">
+      <span class="text-muted">${cls}</span>
+      <span class="badge bg-primary">${cnt}</span>
+    </div>`)
+    .join("");
+}
+
+// カウンターリセット
+document.getElementById("btn-reset-cnt").addEventListener("click", async () => {
+  await fetch("/api/counters/reset", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine})
+  });
+  await refreshCounters();
+});
+
+// ── 初期化 ────────────────────────────────────
+loadModels();
+loadCameras();
+loadProjects();
+</script>
+{% endblock %}

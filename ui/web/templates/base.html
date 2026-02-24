@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ja" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}BILT+YOLO Studio{% endblock %}</title>
+
+  <!-- Bootstrap 5 (ダークテーマ対応) -->
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+  <!-- Bootstrap Icons -->
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+  <style>
+    /* ─── レイアウト ─── */
+    body        { overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+    #main-nav   { flex-shrink: 0; }
+    #page-body  { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+
+    /* ─── サイドバー共通 ─── */
+    .sidebar {
+      width: 280px; min-width: 280px; max-width: 280px;
+      overflow-y: auto; border-right: 1px solid var(--bs-border-color);
+      padding: 0.75rem;
+    }
+
+    /* ─── ステータスバッジ ─── */
+    .svc-badge { font-size: 0.7rem; padding: 0.2rem 0.5rem; border-radius: 10px; }
+    .svc-ok    { background: #198754; color: #fff; }
+    .svc-ng    { background: #dc3545; color: #fff; }
+    .svc-wait  { background: #6c757d; color: #fff; }
+
+    /* ─── エンジン選択タブ ─── */
+    .engine-tab.active { border-bottom: 2px solid var(--bs-primary); }
+
+    /* ─── ビデオキャンバス ─── */
+    #video-canvas, #annotation-canvas {
+      image-rendering: pixelated;
+      display: block; max-width: 100%; max-height: 100%;
+      object-fit: contain;
+    }
+    #video-wrap {
+      flex: 1; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      background: #000;
+    }
+
+    /* ─── アノテーションキャンバス ─── */
+    #annotation-wrap {
+      position: relative; flex: 1; overflow: hidden;
+      background: #111; display: flex; align-items: center; justify-content: center;
+    }
+    #annotation-canvas { cursor: crosshair; }
+    #anno-overlay {
+      position: absolute; top: 0; left: 0; pointer-events: none;
+    }
+
+    /* ─── トレーニングプログレス ─── */
+    .train-log {
+      font-family: monospace; font-size: 0.78rem;
+      background: #0d1117; color: #c9d1d9;
+      height: 200px; overflow-y: auto;
+      padding: 0.5rem; border-radius: 4px;
+      border: 1px solid #30363d;
+    }
+
+    /* ─── チェーンステップ ─── */
+    .chain-step {
+      border: 1px solid var(--bs-border-color);
+      border-radius: 6px; padding: 0.5rem; margin-bottom: 0.4rem;
+    }
+    .chain-step.active  { border-color: #0d6efd; background: rgba(13,110,253,0.08); }
+    .chain-step.ok      { border-color: #198754; background: rgba(25,135,84,0.08); }
+    .chain-step.error   { border-color: #dc3545; background: rgba(220,53,69,0.12); }
+    .chain-step.waiting { border-color: #ffc107; background: rgba(255,193,7,0.08); }
+
+    /* ─── スクロールバー細め ─── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+  </style>
+
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+
+<!-- ナビゲーションバー -->
+<nav class="navbar navbar-dark bg-dark border-bottom px-3 py-1" id="main-nav">
+  <a class="navbar-brand fw-bold" href="/">
+    <i class="bi bi-camera-video-fill text-primary"></i> BILT+YOLO Studio
+  </a>
+
+  <!-- ページタブ -->
+  <div class="d-flex gap-1">
+    <a href="/detection"  class="btn btn-sm {% if request.path == '/detection'  %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+      <i class="bi bi-camera"></i> 検出
+    </a>
+    <a href="/annotation" class="btn btn-sm {% if request.path == '/annotation' %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+      <i class="bi bi-pencil-square"></i> アノテーション
+    </a>
+    <a href="/training"   class="btn btn-sm {% if request.path == '/training'   %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+      <i class="bi bi-cpu"></i> トレーニング
+    </a>
+    <a href="/chain"      class="btn btn-sm {% if request.path == '/chain'      %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+      <i class="bi bi-diagram-3"></i> チェーン
+    </a>
+    <a href="/settings"   class="btn btn-sm {% if request.path == '/settings'   %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+      <i class="bi bi-gear"></i> 設定
+    </a>
+  </div>
+
+  <!-- サービスステータス -->
+  <div class="d-flex align-items-center gap-2" id="svc-status">
+    <span class="svc-badge svc-wait" id="badge-bilt">BILT …</span>
+    <span class="svc-badge svc-wait" id="badge-yolo">YOLO …</span>
+  </div>
+</nav>
+
+<!-- ページコンテンツ -->
+<div id="page-body">
+  {% block body %}{% endblock %}
+</div>
+
+<!-- Bootstrap JS -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+// ─── サービスヘルスポーリング (5秒間隔) ───────────────────────────
+async function pollHealth() {
+  try {
+    const res  = await fetch("/api/health");
+    const data = await res.json();
+    const set  = (id, ok) => {
+      const el = document.getElementById(id);
+      el.className = "svc-badge " + (ok ? "svc-ok" : "svc-ng");
+      el.textContent = id.replace("badge-", "").toUpperCase() + " " + (ok ? "✓" : "✗");
+    };
+    set("badge-bilt", data.bilt);
+    set("badge-yolo", data.yolo);
+  } catch { /* ネットワークエラーは無視し次回ポーリング待ち */ }
+}
+pollHealth();
+setInterval(pollHealth, 5000);
+</script>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>

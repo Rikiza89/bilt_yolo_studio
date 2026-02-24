@@ -1,0 +1,433 @@
+{% extends "base.html" %}
+{% block title %}チェーン検出 — BILT+YOLO Studio{% endblock %}
+
+{% block body %}
+<div class="d-flex h-100">
+
+  <!-- ─── 左サイドバー: チェーン設定 ─── -->
+  <div class="sidebar d-flex flex-column gap-2" style="width:320px;min-width:320px">
+
+    <!-- エンジン選択 -->
+    <div>
+      <label class="form-label fw-semibold small mb-1">エンジン</label>
+      <div class="btn-group w-100">
+        <input type="radio" class="btn-check" name="chain-engine" id="ce-bilt" value="bilt" checked>
+        <label class="btn btn-outline-primary btn-sm" for="ce-bilt">BILT</label>
+        <input type="radio" class="btn-check" name="chain-engine" id="ce-yolo" value="yolo">
+        <label class="btn btn-outline-primary btn-sm" for="ce-yolo">YOLO</label>
+      </div>
+    </div>
+
+    <!-- タイムアウト設定 -->
+    <div>
+      <label class="form-label small mb-1">ステップタイムアウト (秒): <span id="timeout-val">50</span></label>
+      <input type="range" class="form-range" id="chain-timeout" min="5" max="300" step="5" value="50">
+    </div>
+    <div>
+      <label class="form-label small mb-1">サイクル間ポーズ (秒): <span id="pause-val">10</span></label>
+      <input type="range" class="form-range" id="chain-pause" min="0" max="60" step="1" value="10">
+    </div>
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="chk-auto-advance" checked>
+      <label class="form-check-label small" for="chk-auto-advance">自動進行</label>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- ステップ追加 -->
+    <div>
+      <div class="fw-semibold small mb-1">ステップ追加</div>
+      <input type="text" class="form-control form-control-sm mb-1" id="step-name"
+             placeholder="ステップ名">
+      <input type="text" class="form-control form-control-sm mb-1" id="step-classes"
+             placeholder="必須クラス (カンマ区切り)">
+      <input type="number" class="form-control form-control-sm mb-1" id="step-duration"
+             placeholder="最低検出時間 (秒)" value="3" min="0">
+      <button class="btn btn-sm btn-outline-success w-100" id="btn-add-step">
+        <i class="bi bi-plus-lg"></i> ステップを追加
+      </button>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- チェーン保存/ロード -->
+    <div class="fw-semibold small mb-1">チェーン設定</div>
+    <div class="d-flex gap-1">
+      <input type="text" class="form-control form-control-sm" id="chain-save-name"
+             placeholder="設定名">
+      <button class="btn btn-sm btn-outline-secondary" id="btn-save-chain">保存</button>
+    </div>
+    <select class="form-select form-select-sm" id="chain-load-select">
+      <option value="">— 保存済み設定 —</option>
+    </select>
+    <div class="d-flex gap-1">
+      <button class="btn btn-sm btn-outline-primary flex-grow-1" id="btn-load-chain">ロード</button>
+      <button class="btn btn-sm btn-outline-danger" id="btn-delete-chain">削除</button>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- 開始/停止 -->
+    <button class="btn btn-success btn-sm" id="btn-chain-start">
+      <i class="bi bi-play-fill"></i> チェーン開始
+    </button>
+    <button class="btn btn-danger btn-sm" id="btn-chain-stop" disabled>
+      <i class="bi bi-stop-fill"></i> 停止
+    </button>
+
+  </div><!-- /left sidebar -->
+
+  <!-- ─── 中央: ビデオ + ステップ表示 ─── -->
+  <div class="d-flex flex-column flex-grow-1" style="overflow:hidden">
+
+    <!-- ステップリスト -->
+    <div style="padding:0.5rem;border-bottom:1px solid var(--bs-border-color);overflow-y:auto;max-height:200px">
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <span class="fw-semibold small">チェーンステップ</span>
+        <button class="btn btn-xs btn-sm btn-outline-danger py-0" id="btn-clear-steps">
+          全クリア
+        </button>
+      </div>
+      <div id="step-list">
+        <div class="text-muted small">ステップを追加してください</div>
+      </div>
+    </div>
+
+    <!-- ビデオ -->
+    <div id="video-wrap" style="flex:1">
+      <img id="chain-frame" src="/api/frame/latest?engine=bilt&t=0" alt="frame"
+           style="max-width:100%;max-height:100%;object-fit:contain">
+    </div>
+
+  </div>
+
+  <!-- ─── 右サイドバー: ランタイムステータス ─── -->
+  <div class="sidebar d-flex flex-column gap-2"
+       style="width:260px;min-width:260px;border-left:1px solid var(--bs-border-color);border-right:none">
+
+    <div class="fw-semibold small">ランタイム状況</div>
+
+    <!-- 全体ステータス -->
+    <div class="d-flex justify-content-between align-items-center">
+      <span class="small text-muted">ステータス</span>
+      <span id="chain-status-badge" class="badge bg-secondary">停止中</span>
+    </div>
+    <div class="d-flex justify-content-between">
+      <span class="small text-muted">サイクル数</span>
+      <span id="chain-cycle" class="fw-bold">0</span>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- 現在のステップ -->
+    <div class="fw-semibold small">現在のステップ</div>
+    <div id="current-step-name" class="badge bg-primary w-100 p-2 text-wrap">—</div>
+
+    <!-- タイマー -->
+    <div>
+      <label class="form-label small mb-0">残り時間</label>
+      <div class="progress mb-1" style="height:8px">
+        <div class="progress-bar bg-warning" id="step-timer-bar" style="width:100%"></div>
+      </div>
+      <div class="text-center small" id="step-timer-val">—</div>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- エラー通知 -->
+    <div id="error-panel" style="display:none">
+      <div class="alert alert-danger py-2 small mb-1">
+        <i class="bi bi-exclamation-triangle-fill"></i>
+        <span id="error-msg">エラー</span>
+      </div>
+      <button class="btn btn-sm btn-warning w-100" id="btn-ack-error">
+        エラーを確認して続行
+      </button>
+    </div>
+
+    <!-- ポーズ通知 -->
+    <div id="pause-panel" style="display:none">
+      <div class="alert alert-info py-2 small mb-1">
+        <i class="bi bi-pause-circle-fill"></i> サイクル間ポーズ中
+        <span id="pause-remaining"></span>
+      </div>
+    </div>
+
+    <hr class="my-1">
+
+    <!-- 手動制御 -->
+    <div class="fw-semibold small">手動制御</div>
+    <button class="btn btn-sm btn-outline-secondary" id="btn-chain-pause">
+      <i class="bi bi-pause-fill"></i> 一時停止
+    </button>
+    <button class="btn btn-sm btn-outline-secondary" id="btn-chain-resume">
+      <i class="bi bi-play-fill"></i> 再開
+    </button>
+    <button class="btn btn-sm btn-outline-secondary" id="btn-chain-next">
+      <i class="bi bi-skip-forward-fill"></i> 次のステップへ
+    </button>
+    <button class="btn btn-sm btn-outline-secondary" id="btn-chain-reset">
+      <i class="bi bi-arrow-counterclockwise"></i> リセット
+    </button>
+
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ═══════════════════════════════════════════════
+// チェーン検出ページ ロジック
+// ═══════════════════════════════════════════════
+
+let _engine      = "bilt";
+let _steps       = [];
+let _running     = false;
+let _pollTimer   = null;
+let _frameTimer  = null;
+
+// ── エンジン切替 ───────────────────────────────
+document.querySelectorAll('input[name="chain-engine"]').forEach(r => {
+  r.addEventListener("change", () => { _engine = r.value; });
+});
+
+// ── スライダー ────────────────────────────────
+document.getElementById("chain-timeout").addEventListener("input", function() {
+  document.getElementById("timeout-val").textContent = this.value;
+});
+document.getElementById("chain-pause").addEventListener("input", function() {
+  document.getElementById("pause-val").textContent = this.value;
+});
+
+// ── ステップ追加 ──────────────────────────────
+document.getElementById("btn-add-step").addEventListener("click", () => {
+  const name     = document.getElementById("step-name").value.trim();
+  const classRaw = document.getElementById("step-classes").value.trim();
+  const duration = parseFloat(document.getElementById("step-duration").value) || 0;
+  if (!name || !classRaw) return;
+
+  const classes = classRaw.split(",").map(c => c.trim()).filter(Boolean);
+  _steps.push({name, required_classes: classes, min_duration: duration});
+  renderSteps();
+
+  document.getElementById("step-name").value = "";
+  document.getElementById("step-classes").value = "";
+});
+
+function renderSteps() {
+  const el = document.getElementById("step-list");
+  if (_steps.length === 0) {
+    el.innerHTML = '<div class="text-muted small">ステップを追加してください</div>';
+    return;
+  }
+  el.innerHTML = _steps.map((s, i) =>
+    `<div class="chain-step d-flex justify-content-between align-items-start">
+      <div>
+        <div class="fw-semibold small">${i+1}. ${s.name}</div>
+        <div class="text-muted" style="font-size:0.72rem">
+          ${s.required_classes.join(", ")} | ${s.min_duration}s
+        </div>
+      </div>
+      <button class="btn btn-xs btn-sm btn-outline-danger py-0 px-1"
+              onclick="deleteStep(${i})">✕</button>
+    </div>`
+  ).join("");
+}
+
+function deleteStep(i) {
+  _steps.splice(i, 1);
+  renderSteps();
+}
+
+document.getElementById("btn-clear-steps").addEventListener("click", () => {
+  _steps = []; renderSteps();
+});
+
+// ── チェーン開始 ──────────────────────────────
+document.getElementById("btn-chain-start").addEventListener("click", async () => {
+  if (_steps.length === 0) { alert("ステップを追加してください"); return; }
+
+  const config = {
+    engine:           _engine,
+    chain_mode:       true,
+    chain_steps:      _steps,
+    chain_timeout:    parseFloat(document.getElementById("chain-timeout").value),
+    chain_pause_time: parseFloat(document.getElementById("chain-pause").value),
+    chain_auto_advance: document.getElementById("chk-auto-advance").checked,
+    conf: 0.6, iou: 0.1, max_det: 10,
+  };
+
+  // 設定を適用してから開始
+  await fetch("/api/detection/settings", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(config)
+  });
+
+  const res  = await fetch("/api/detection/start", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine})
+  });
+  const data = await res.json();
+
+  if (data.success) {
+    _running = true;
+    document.getElementById("btn-chain-start").disabled = true;
+    document.getElementById("btn-chain-stop").disabled  = false;
+    _frameTimer = setInterval(refreshFrame, 33);
+    _pollTimer  = setInterval(refreshChainStatus, 500);
+  }
+});
+
+// ── チェーン停止 ──────────────────────────────
+document.getElementById("btn-chain-stop").addEventListener("click", async () => {
+  await fetch("/api/detection/stop", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine})
+  });
+  _running = false;
+  clearInterval(_frameTimer);
+  clearInterval(_pollTimer);
+  document.getElementById("btn-chain-start").disabled = false;
+  document.getElementById("btn-chain-stop").disabled  = true;
+});
+
+// ── フレーム更新 ──────────────────────────────
+function refreshFrame() {
+  document.getElementById("chain-frame").src =
+    `/api/frame/latest?engine=${_engine}&t=${Date.now()}`;
+}
+
+// ── ステータスポーリング ──────────────────────
+async function refreshChainStatus() {
+  try {
+    const res  = await fetch(`/api/chain/status?engine=${_engine}`);
+    const data = await res.json();
+    updateChainUI(data);
+  } catch { /* ネットワークエラーは無視 */ }
+}
+
+function updateChainUI(data) {
+  const badge  = document.getElementById("chain-status-badge");
+  const colors = {running:"bg-success",paused:"bg-warning",error:"bg-danger",idle:"bg-secondary"};
+  const labels = {running:"実行中",paused:"一時停止",error:"エラー",idle:"停止中",cycle_pause:"ポーズ中"};
+  const status = data.status || "idle";
+  badge.className = `badge ${colors[status] || "bg-secondary"}`;
+  badge.textContent = labels[status] || status;
+
+  document.getElementById("chain-cycle").textContent = data.cycle_count || 0;
+  document.getElementById("current-step-name").textContent =
+    data.current_step_name || "—";
+
+  // タイマー表示
+  const timeout = parseFloat(document.getElementById("chain-timeout").value) || 50;
+  const elapsed = data.step_elapsed || 0;
+  const pct     = Math.max(0, Math.min(100, (1 - elapsed / timeout) * 100));
+  document.getElementById("step-timer-bar").style.width = `${pct}%`;
+  document.getElementById("step-timer-val").textContent  =
+    `${Math.max(0, timeout - elapsed).toFixed(1)}s`;
+
+  // エラーパネル
+  const errPanel = document.getElementById("error-panel");
+  if (data.error_message) {
+    errPanel.style.display = "block";
+    document.getElementById("error-msg").textContent = data.error_message;
+  } else {
+    errPanel.style.display = "none";
+  }
+
+  // ポーズパネル
+  const pausePanel = document.getElementById("pause-panel");
+  if (status === "cycle_pause") {
+    pausePanel.style.display = "block";
+    document.getElementById("pause-remaining").textContent =
+      data.pause_remaining ? ` (残り ${data.pause_remaining.toFixed(1)}s)` : "";
+  } else {
+    pausePanel.style.display = "none";
+  }
+
+  // ステップリストのスタイル更新
+  document.querySelectorAll(".chain-step").forEach((el, i) => {
+    el.className = "chain-step d-flex justify-content-between align-items-start";
+    if (i === data.current_step_index) {
+      el.classList.add(status === "error" ? "error" : "active");
+    } else if (i < (data.current_step_index || 0)) {
+      el.classList.add("ok");
+    }
+  });
+}
+
+// ── エラー確認 ────────────────────────────────
+document.getElementById("btn-ack-error").addEventListener("click", async () => {
+  await fetch("/api/chain/acknowledge_error", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine})
+  });
+});
+
+// ── 手動制御 ──────────────────────────────────
+["pause","resume","next","reset"].forEach(action => {
+  document.getElementById(`btn-chain-${action}`).addEventListener("click", async () => {
+    await fetch("/api/chain/control", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({engine: _engine, action})
+    });
+  });
+});
+
+// ── チェーン設定の保存/ロード ─────────────────
+document.getElementById("btn-save-chain").addEventListener("click", async () => {
+  const name = document.getElementById("chain-save-name").value.trim();
+  if (!name || _steps.length === 0) return;
+  await fetch("/api/chains/save", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, name, steps: _steps})
+  });
+  await loadSavedChains();
+});
+
+document.getElementById("btn-load-chain").addEventListener("click", async () => {
+  const name = document.getElementById("chain-load-select").value;
+  if (!name) return;
+  const res  = await fetch("/api/chains/load", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, name})
+  });
+  const data = await res.json();
+  if (data.steps) { _steps = data.steps; renderSteps(); }
+});
+
+document.getElementById("btn-delete-chain").addEventListener("click", async () => {
+  const name = document.getElementById("chain-load-select").value;
+  if (!name) return;
+  await fetch("/api/chains/delete", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, name})
+  });
+  await loadSavedChains();
+});
+
+async function loadSavedChains() {
+  const res  = await fetch(`/api/chains/saved?engine=${_engine}`);
+  const data = await res.json();
+  const sel  = document.getElementById("chain-load-select");
+  sel.innerHTML = '<option value="">— 保存済み設定 —</option>';
+  (data.chains || []).forEach(n => {
+    const opt = document.createElement("option");
+    opt.value = n; opt.textContent = n;
+    sel.appendChild(opt);
+  });
+}
+
+// ── 初期化 ────────────────────────────────────
+loadSavedChains();
+</script>
+{% endblock %}

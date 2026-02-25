@@ -9,40 +9,6 @@ HTTP APIを通じてのみUIと通信し、静的リンクを行わない。
   UIコード (PySide6: LGPL) がこのサービスをインポートすると
   UIコード全体がAGPLの影響を受ける可能性がある。
   プロセス分離により、HTTP境界がライセンス境界となる。
-
-提供API:
-  GET  /health                   — 死活確認
-  POST /models/available         — モデル一覧取得
-  POST /train/start              — トレーニング開始
-  GET  /train/status             — トレーニング状態確認
-  POST /autotrain/start          — オートトレーニング開始
-  GET  /autotrain/status         — オートトレーニング状態確認
-  POST /relabel/start            — リラベリング開始
-  GET  /api/cameras              — カメラ一覧取得
-  POST /api/camera/select        — カメラ選択
-  POST /api/camera/resolution    — カメラ解像度設定
-  GET  /api/camera/info          — カメラ情報取得
-  POST /api/model/load           — モデルロード
-  GET  /api/model/info           — モデル情報取得
-  GET  /api/detection/settings   — 検出設定取得
-  POST /api/detection/settings   — 検出設定更新
-  POST /api/detection/start      — 検出開始
-  POST /api/detection/stop       — 検出停止
-  GET  /api/detection/stats      — 検出統計取得
-  GET  /api/frame/latest         — 最新フレーム取得 (JPEG)
-  GET  /api/counters             — カウンター取得
-  POST /api/counters/reset       — カウンターリセット
-  GET  /api/chain/status         — チェーン状態取得
-  POST /api/chain/control        — チェーン制御
-  GET  /api/chain/config         — チェーン設定取得
-  POST /api/chain/config         — チェーン設定更新
-  POST /api/chain/acknowledge_error — エラー確認
-  GET  /api/chains/saved         — 保存済みチェーン一覧
-  POST /api/chains/save          — チェーン保存
-  POST /api/chains/load          — チェーン読み込み
-  POST /api/chains/delete        — チェーン削除
-  GET  /api/projects             — プロジェクト一覧
-  POST /api/projects/create      — プロジェクト作成
 """
 
 from __future__ import annotations
@@ -66,18 +32,27 @@ from flask import Flask, Response, jsonify, request
 from werkzeug.utils import secure_filename
 
 # ──────────────────────────────────────────────
-# パス設定: プロジェクトルートをPythonパスに追加し
-# bilt パッケージと shared パッケージをインポート可能にする
+# パス設定
 # ──────────────────────────────────────────────
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 # BILTライブラリのインポート (AGPL-3.0)
-# このインポートはこのプロセス内にのみ存在する
 from bilt import BILT  # noqa: E402  (AGPL)
 
+from shared.camera_utils import CameraManager             # noqa: E402
 from shared.contracts import AppDirectories, Ports, TaskType  # noqa: E402
+from shared.detection_common import (                      # noqa: E402
+    acknowledge_chain_error,
+    backup_project,
+    make_default_chain_state,
+    make_default_detection_settings,
+    make_default_detection_stats,
+    process_chain,
+    sanitize_detection_settings,
+    start_chain,
+)
 
 # ──────────────────────────────────────────────
 # アプリケーション初期化
@@ -92,120 +67,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app   = Flask(__name__)
-dirs  = AppDirectories(base=str(_ROOT))
+app  = Flask(__name__)
+dirs = AppDirectories(base=str(_ROOT))
 dirs.ensure_all()
 
 # ──────────────────────────────────────────────
 # グローバル状態
-# すべての状態変更はロックで保護する
 # ──────────────────────────────────────────────
-_state_lock = threading.Lock()
 
-# モデル状態
+# Thread-safe camera manager (DRY: shared with YOLO service)
+camera = CameraManager()
+
+# Model state — protected by _model_lock
+_model_lock = threading.Lock()
 current_model: Optional[BILT] = None
 model_info: Dict[str, Any] = {"name": None, "classes": [], "loaded": False}
 
-# カメラ状態
-_camera: Optional[cv2.VideoCapture] = None
-_camera_index: Optional[int] = None
-_camera_lock = threading.Lock()
-
-# 検出ループ状態
-detection_active = False
+# Detection loop control — threading.Event for safe cross-thread signaling
+_detection_event = threading.Event()
 detection_thread: Optional[threading.Thread] = None
 latest_frame: Optional[np.ndarray] = None
 frame_lock = threading.Lock()
 counter_triggered: Dict[str, bool] = {}
 
-# トレーニング状態
+# Training state — protected by _training_lock
+_training_lock = threading.Lock()
 training_active  = False
 autotrain_active = False
 
-# 検出設定
-detection_settings: Dict[str, Any] = {
-    "conf": 0.60, "iou": 0.10, "max_det": 10,
-    "classes": None, "counter_mode": False,
-    "save_images": False, "dataset_capture": False,
-    "project_folder": "",
-    "chain_mode": False, "chain_steps": [],
-    "chain_timeout": 50.0, "chain_pause_time": 10.0,
-    "chain_auto_advance": True,
-}
-
+# Detection settings / stats / chain state (DRY: shared factories)
+detection_settings: Dict[str, Any] = make_default_detection_settings()
 object_counters: Dict[str, int] = {}
-detection_stats: Dict[str, Any] = {
-    "total_detections": 0, "fps": 0.0,
-    "last_detection_time": None,
-    "detections_per_frame": 0,   # 直近フレームの検出数
-    "current_classes": [],       # 直近フレームで検出されたクラス名リスト
-}
-
-chain_state: Dict[str, Any] = {
-    "active": False, "current_step": 0,
-    "step_start_time": None, "completed_cycles": 0,
-    "failed_steps": 0, "step_history": [],
-    "current_detections": {}, "last_step_result": None,
-    "cycle_pause": False, "cycle_pause_start": None,
-    "waiting_for_ack": False, "error_message": None,
-    "wrong_object": None, "error_step": None,
-}
-
-
-# ══════════════════════════════════════════════
-# カメラユーティリティ
-# ══════════════════════════════════════════════
-
-def _get_available_cameras() -> List[Dict[str, Any]]:
-    """利用可能なカメラデバイスを検索して返す。"""
-    cameras = []
-    for idx in range(4):
-        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY)
-        if cap.isOpened():
-            cameras.append({
-                "index":  idx,
-                "width":  int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                "fps":    cap.get(cv2.CAP_PROP_FPS),
-                "name":   f"Camera {idx}",
-            })
-            cap.release()
-    return cameras
-
-
-def _init_camera(index: int) -> bool:
-    """
-    指定インデックスのカメラを初期化する。
-    既存のカメラは先にリリースする。
-    """
-    global _camera, _camera_index
-    with _camera_lock:
-        if _camera:
-            _camera.release()
-        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-        cap = cv2.VideoCapture(index, backend)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(index)
-        if not cap.isOpened():
-            logger.error("カメラ %d を開けませんでした", index)
-            return False
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 960)
-        cap.set(cv2.CAP_PROP_FPS,          30)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        _camera       = cap
-        _camera_index = index
-        logger.info("カメラ %d を初期化しました", index)
-        return True
-
-
-def _grab_frame() -> Optional[np.ndarray]:
-    """最新フレームを取得する。カメラが未起動の場合は None。"""
-    with _camera_lock:
-        if _camera is None or not _camera.isOpened():
-            return None
-        ret, frame = _camera.read()
-        return frame if ret else None
+detection_stats: Dict[str, Any] = make_default_detection_stats()
+chain_state: Dict[str, Any] = make_default_chain_state()
 
 
 # ══════════════════════════════════════════════
@@ -215,7 +109,7 @@ def _grab_frame() -> Optional[np.ndarray]:
 def _detection_loop() -> None:
     """
     カメラフレームを連続取得し、BILTで推論するメインループ。
-    detection_active が False になるまで動作し続ける。
+    _detection_event が clear されるまで動作し続ける。
     """
     global latest_frame, object_counters, counter_triggered
 
@@ -223,26 +117,32 @@ def _detection_loop() -> None:
     fps_time     = time.time()
     frame_period = 1.0 / 30
 
-    while detection_active:
+    while _detection_event.is_set():
         t0 = time.time()
         try:
-            frame = _grab_frame()
+            frame = camera.grab_frame()
             if frame is None:
-                # カメラが閉じている場合は再初期化を試みる
-                if _camera_index is not None:
-                    logger.warning("検出ループ: フレーム取得失敗。カメラを再初期化します (index=%d)", _camera_index)
-                    _init_camera(_camera_index)
+                if camera.camera_index is not None:
+                    logger.warning(
+                        "検出ループ: フレーム取得失敗。カメラを再初期化します (index=%d)",
+                        camera.camera_index,
+                    )
+                    camera.init_camera(camera.camera_index)
                 time.sleep(0.1)
                 continue
 
             annotated = frame.copy()
 
-            if current_model and model_info["loaded"]:
+            with _model_lock:
+                model = current_model
+                loaded = model_info["loaded"]
+
+            if model and loaded:
                 from PIL import Image
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil = Image.fromarray(rgb)
 
-                bilt_dets = current_model.predict(
+                bilt_dets = model.predict(
                     pil,
                     conf=detection_settings["conf"],
                     iou=detection_settings["iou"],
@@ -256,16 +156,15 @@ def _detection_loop() -> None:
                             object_counters[name] = object_counters.get(name, 0) + 1
                             counter_triggered[name] = True
 
-                # チェーンモード処理
+                # チェーンモード処理 (DRY: shared logic)
                 if detection_settings["chain_mode"]:
-                    _process_chain(bilt_dets)
+                    process_chain(bilt_dets, detection_settings, chain_state)
 
-                # フレームにアノテーションを描画
                 annotated = _draw_detections(frame.copy(), bilt_dets)
-                detection_stats["total_detections"] += len(bilt_dets)
-                detection_stats["detections_per_frame"] = len(bilt_dets)
-                detection_stats["current_classes"]      = list({d["class_name"] for d in bilt_dets})
-                detection_stats["last_detection_time"]  = datetime.now().isoformat()
+                detection_stats["total_detections"]     += len(bilt_dets)
+                detection_stats["detections_per_frame"]  = len(bilt_dets)
+                detection_stats["current_classes"]       = list({d["class_name"] for d in bilt_dets})
+                detection_stats["last_detection_time"]   = datetime.now().isoformat()
 
             # FPS計算
             fps_counter += 1
@@ -302,65 +201,6 @@ def _draw_detections(frame: np.ndarray, dets: List[Dict]) -> np.ndarray:
 
 
 # ══════════════════════════════════════════════
-# チェーン検出ロジック
-# ══════════════════════════════════════════════
-
-def _process_chain(dets: List[Dict]) -> None:
-    """チェーン検出ステップの進行を処理する。"""
-    steps = detection_settings["chain_steps"]
-    if not steps or not chain_state["active"]:
-        return
-
-    now = time.time()
-
-    # 一時停止中の処理
-    if chain_state["cycle_pause"]:
-        if now - chain_state["cycle_pause_start"] >= detection_settings["chain_pause_time"]:
-            chain_state.update({
-                "cycle_pause": False, "cycle_pause_start": None,
-                "current_step": 0, "step_start_time": now,
-            })
-        return
-
-    # エラー確認待ち
-    if chain_state["waiting_for_ack"]:
-        return
-
-    step_idx = chain_state["current_step"]
-    if step_idx >= len(steps):
-        chain_state.update({
-            "completed_cycles": chain_state["completed_cycles"] + 1,
-            "cycle_pause": True, "cycle_pause_start": now,
-        })
-        return
-
-    step    = steps[step_idx]
-    present = {d["class_name"]: 0 for d in dets}
-    for d in dets:
-        present[d["class_name"]] = present.get(d["class_name"], 0) + 1
-
-    required: Dict[str, int] = step.get("classes", {})
-
-    # 誤検出チェック
-    for cls in present:
-        if cls not in required:
-            chain_state.update({
-                "waiting_for_ack": True,
-                "error_step":      step_idx,
-                "error_message":   f"ステップ '{step['name']}' で不正なオブジェクト '{cls}' を検出",
-                "wrong_object":    cls,
-                "failed_steps":    chain_state["failed_steps"] + 1,
-            })
-            return
-
-    # 正解チェック
-    if all(present.get(cls, 0) >= cnt for cls, cnt in required.items()):
-        chain_state["current_step"]  = step_idx + 1
-        chain_state["step_start_time"] = now
-        chain_state["last_step_result"] = "success"
-
-
-# ══════════════════════════════════════════════
 # トレーニングワーカー
 # ══════════════════════════════════════════════
 
@@ -368,7 +208,8 @@ def _training_worker(config: Dict[str, Any]) -> None:
     """バックグラウンドスレッドでBILTトレーニングを実行する。"""
     global training_active
     try:
-        training_active = True
+        with _training_lock:
+            training_active = True
         model_name = config.get("model_name") or config.get("model")
 
         if not model_name or model_name == "scratch":
@@ -388,12 +229,10 @@ def _training_worker(config: Dict[str, Any]) -> None:
             name         = f"bilt_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         )
 
-        # カスタム名で保存
         custom = config.get("custom_save_name")
         if custom:
             if not custom.endswith(".pth"):
                 custom += ".pth"
-            # トレーニング結果の best.pth を models/ にコピー
             run_dir = Path(config.get("project_path", str(_ROOT))) / results.get("name", "")
             src = run_dir / "weights" / "best.pth"
             if src.exists():
@@ -404,25 +243,24 @@ def _training_worker(config: Dict[str, Any]) -> None:
     except Exception:
         logger.error("BILTトレーニングエラー:\n%s", traceback.format_exc())
     finally:
-        training_active = False
+        with _training_lock:
+            training_active = False
 
 
 def _autotrain_worker(config: Dict[str, Any]) -> None:
     """オートラベリング → トレーニングを実行するワーカー。"""
     global autotrain_active
     try:
-        autotrain_active = True
+        with _training_lock:
+            autotrain_active = True
         model_path = config["model_path"]
         model = BILT(model_path)
 
-        # バックアップ
         if config.get("backup_enabled", True):
-            _backup_project(config["project_path"])
+            backup_project(config["project_path"])
 
-        # オートラベリング
         _auto_label(model, config)
 
-        # 再トレーニング
         model.train(
             dataset      = os.path.dirname(config["data_yaml"]),
             epochs       = int(config.get("epochs", 50)),
@@ -437,7 +275,8 @@ def _autotrain_worker(config: Dict[str, Any]) -> None:
     except Exception:
         logger.error("オートトレーニングエラー:\n%s", traceback.format_exc())
     finally:
-        autotrain_active = False
+        with _training_lock:
+            autotrain_active = False
 
 
 def _auto_label(model: BILT, config: Dict[str, Any]) -> None:
@@ -462,7 +301,7 @@ def _auto_label(model: BILT, config: Dict[str, Any]) -> None:
                 w, h = img.size
                 dets = model.predict(img, conf=conf, iou=iou)
                 lbl  = labels_dir / (img_file.stem + ".txt")
-                with open(lbl, "w") as f:
+                with open(lbl, "w", encoding="utf-8") as f:
                     for d in dets:
                         x1, y1, x2, y2 = d["bbox"]
                         xc = ((x1 + x2) / 2) / w
@@ -472,18 +311,6 @@ def _auto_label(model: BILT, config: Dict[str, Any]) -> None:
                         f.write(f"{d['class_id']} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
             except Exception:
                 logger.warning("自動ラベリング失敗: %s", img_file)
-
-
-def _backup_project(project_path: str) -> None:
-    """プロジェクトのimages/labelsをタイムスタンプ付きでバックアップする。"""
-    ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bk_dir = Path(project_path) / f"backup_{ts}"
-    for split in ("train", "val"):
-        for sub in ("images", "labels"):
-            src = Path(project_path) / split / sub
-            if src.exists():
-                shutil.copytree(str(src), str(bk_dir / split / sub))
-    logger.info("バックアップ作成: %s", bk_dir)
 
 
 # ══════════════════════════════════════════════
@@ -518,16 +345,18 @@ def load_model():
     name = (request.json or {}).get("model_name", "")
     path = Path(dirs.models) / name
     if not path.exists():
-        return jsonify({"success": False, "error": f"モデルが見つかりません: {name}"}), 400
+        return jsonify({"success": False, "error": "モデルが見つかりません"}), 400
     try:
-        current_model = BILT(str(path))
-        model_info = {
-            "name":        name,
-            "classes":     current_model.names,
-            "loaded":      True,
-            "class_count": current_model.num_classes,
-        }
-        logger.info("モデルをロードしました: %s (%d クラス)", name, current_model.num_classes)
+        loaded = BILT(str(path))
+        with _model_lock:
+            current_model = loaded
+            model_info = {
+                "name":        name,
+                "classes":     loaded.names,
+                "loaded":      True,
+                "class_count": loaded.num_classes,
+            }
+        logger.info("モデルをロードしました: %s (%d クラス)", name, loaded.num_classes)
         return jsonify({"success": True, "model_info": model_info})
     except Exception as exc:
         logger.error("モデルロードエラー: %s", exc)
@@ -539,59 +368,45 @@ def model_info_route():
     return jsonify({"success": True, "model_info": model_info})
 
 
-# ── カメラ管理 ─────────────────────────────────
+# ── カメラ管理 (DRY: CameraManager) ──────────────
 
 @app.route("/api/cameras")
 def get_cameras():
-    return jsonify({"success": True, "cameras": _get_available_cameras()})
+    return jsonify({"success": True, "cameras": camera.get_available_cameras()})
 
 
 @app.route("/api/camera/select", methods=["POST"])
 def select_camera():
-    idx = int((request.json or {}).get("camera_index", 0))
-    ok  = _init_camera(idx)
-    return jsonify({"success": ok})
+    try:
+        idx = int((request.json or {}).get("camera_index", 0))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "camera_index が無効です"}), 400
+    return jsonify({"success": camera.init_camera(idx)})
 
 
 @app.route("/api/camera/resolution", methods=["POST"])
 def set_camera_resolution():
-    data   = request.json or {}
-    width  = int(data.get("width", 1280))
-    height = int(data.get("height", 960))
-    with _camera_lock:
-        if _camera and _camera.isOpened():
-            _camera.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
-            _camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    return jsonify({"success": True, "width": width, "height": height})
+    data = request.json or {}
+    try:
+        w, h = int(data.get("width", 1280)), int(data.get("height", 960))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "解像度パラメータが無効です"}), 400
+    camera.set_resolution(w, h)
+    return jsonify({"success": True, "width": w, "height": h})
 
 
 @app.route("/api/camera/info")
 def camera_info():
-    with _camera_lock:
-        if _camera and _camera.isOpened():
-            info = {
-                "index":  _camera_index,
-                "width":  int(_camera.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                "height": int(_camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                "fps":    _camera.get(cv2.CAP_PROP_FPS),
-            }
-            return jsonify({"success": True, "info": info})
+    info = camera.get_info()
+    if info:
+        return jsonify({"success": True, "info": info})
     return jsonify({"success": False, "error": "カメラが初期化されていません"})
 
 
-# ── 検出制御 ──────────────────────────────────
-
 @app.route("/api/camera/preview")
 def camera_preview():
-    """
-    検出オーバーレイなしの生フレームをJPEGで返す。
-    カメラが閉じていた場合、_camera_index が既知であれば再初期化する。
-    """
-    frame = _grab_frame()
-    if frame is None and _camera_index is not None:
-        _init_camera(_camera_index)
-        import time as _time; _time.sleep(0.1)
-        frame = _grab_frame()
+    """検出オーバーレイなしの生フレームをJPEGで返す。"""
+    frame = camera.grab_frame_with_retry()
     if frame is None:
         frame = np.zeros((480, 640, 3), np.uint8)
     ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -602,14 +417,7 @@ def camera_preview():
 
 @app.route("/api/camera/snapshot", methods=["POST"])
 def camera_snapshot():
-    """
-    現在のカメラフレームをプロジェクトの images フォルダに保存する。
-
-    _grab_frame() が None を返した場合（カメラが閉じている）、
-    _camera_index が既知であれば再初期化してリトライする。
-    Windows の CAP_DSHOW はスキャン後に一度リリースされるため
-    このリトライが必要になるケースがある。
-    """
+    """現在のカメラフレームをプロジェクトの images フォルダに保存する。"""
     data         = request.json or {}
     project_name = data.get("project_name", "").strip()
     filename     = data.get("filename", "").strip()
@@ -617,15 +425,7 @@ def camera_snapshot():
     if not project_name:
         return jsonify({"success": False, "error": "project_name が指定されていません"}), 400
 
-    frame = _grab_frame()
-
-    # カメラが閉じていた場合、既知のインデックスで再初期化してリトライ
-    if frame is None and _camera_index is not None:
-        logger.warning("スナップショット: カメラが閉じています。再初期化 (index=%d)", _camera_index)
-        if _init_camera(_camera_index):
-            import time as _time
-            _time.sleep(0.15)  # カメラが安定するまで待機
-            frame = _grab_frame()
+    frame = camera.grab_frame_with_retry()
 
     if frame is None:
         return jsonify({"success": False, "error": "カメラが初期化されていません。サイドバーで再接続してください"}), 400
@@ -645,28 +445,30 @@ def camera_snapshot():
     return jsonify({"success": True, "filename": filename, "path": str(dest)})
 
 
+# ── 検出制御 ──────────────────────────────────
+
 @app.route("/api/detection/settings", methods=["GET", "POST"])
 def det_settings():
     if request.method == "POST":
-        detection_settings.update(request.json or {})
+        # Security: whitelist allowed keys to prevent state injection
+        safe = sanitize_detection_settings(request.json or {})
+        detection_settings.update(safe)
         return jsonify({"success": True, "settings": detection_settings})
     return jsonify({"success": True, "settings": detection_settings})
 
 
 @app.route("/api/detection/start", methods=["POST"])
 def start_detection():
-    """
-    検出ループを開始する。
-    モデルが未ロードの場合はエラーを返す — サイレントな「検出なし」状態を防ぐ。
-    """
-    global detection_active, detection_thread
-    if not model_info["loaded"] or current_model is None:
-        return jsonify({
-            "success": False,
-            "error":   "モデルが未ロードです。先にモデルをロードしてください。"
-        }), 400
-    if not detection_active:
-        detection_active = True
+    """検出ループを開始する。モデル未ロードならエラーを返す。"""
+    global detection_thread
+    with _model_lock:
+        if not model_info["loaded"] or current_model is None:
+            return jsonify({
+                "success": False,
+                "error":   "モデルが未ロードです。先にモデルをロードしてください。"
+            }), 400
+    if not _detection_event.is_set():
+        _detection_event.set()
         if detection_thread is None or not detection_thread.is_alive():
             detection_thread = threading.Thread(
                 target=_detection_loop, daemon=True, name="bilt-detect"
@@ -677,8 +479,7 @@ def start_detection():
 
 @app.route("/api/detection/stop", methods=["POST"])
 def stop_detection():
-    global detection_active
-    detection_active = False
+    _detection_event.clear()
     return jsonify({"success": True})
 
 
@@ -689,7 +490,6 @@ def detection_stats_route():
 
 @app.route("/api/frame/latest")
 def latest_frame_route():
-    """最新フレームをJPEGで返す。フレームがない場合は黒フレームを返す。"""
     with frame_lock:
         f = latest_frame.copy() if latest_frame is not None else np.zeros((480, 640, 3), np.uint8)
     ret, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -714,14 +514,14 @@ def reset_counters():
     return jsonify({"success": True})
 
 
-# ── チェーン検出 ──────────────────────────────
+# ── チェーン検出 (DRY: shared logic) ──────────
 
 @app.route("/api/chain/status")
 def chain_status_route():
-    steps     = detection_settings["chain_steps"]
-    step_idx  = chain_state["current_step"]
-    step_cfg  = steps[step_idx] if steps and step_idx < len(steps) else None
-    now       = time.time()
+    steps    = detection_settings["chain_steps"]
+    step_idx = chain_state["current_step"]
+    step_cfg = steps[step_idx] if steps and step_idx < len(steps) else None
+    now      = time.time()
 
     remaining = max(0.0, detection_settings["chain_timeout"] -
                     (now - (chain_state["step_start_time"] or now)))
@@ -743,16 +543,7 @@ def chain_status_route():
 def chain_control():
     action = (request.json or {}).get("action", "")
     if action == "start":
-        detection_settings["chain_mode"] = True
-        chain_state.update({
-            "active": True, "current_step": 0,
-            "step_start_time": time.time(),
-            "completed_cycles": 0, "failed_steps": 0,
-            "step_history": [], "current_detections": {},
-            "last_step_result": None, "cycle_pause": False,
-            "cycle_pause_start": None, "waiting_for_ack": False,
-            "error_message": None, "wrong_object": None, "error_step": None,
-        })
+        start_chain(detection_settings, chain_state)
     elif action == "stop":
         detection_settings["chain_mode"] = False
         chain_state["active"] = False
@@ -777,16 +568,7 @@ def chain_config():
 
 @app.route("/api/chain/acknowledge_error", methods=["POST"])
 def ack_error():
-    if chain_state.get("waiting_for_ack"):
-        chain_state.update({
-            "waiting_for_ack": False,
-            "error_message":   None,
-            "wrong_object":    None,
-            "last_step_result": None,
-            "step_start_time": time.time(),
-            "current_step":    chain_state.get("error_step", chain_state["current_step"]),
-            "error_step":      None,
-        })
+    if acknowledge_chain_error(chain_state):
         return jsonify({"success": True, "message": "エラーを確認しました。ステップを再試行します"})
     return jsonify({"success": False, "message": "確認すべきエラーがありません"})
 
@@ -846,9 +628,9 @@ def load_chain():
         return jsonify({"success": False, "error": "チェーンが見つかりません"}), 404
     data = json.loads(path.read_text(encoding="utf-8"))
     detection_settings["chain_steps"]        = data["chain_steps"]
-    detection_settings["chain_timeout"]       = data.get("chain_timeout", 50.0)
-    detection_settings["chain_auto_advance"]  = data.get("chain_auto_advance", True)
-    detection_settings["chain_pause_time"]    = data.get("chain_pause_time", 10.0)
+    detection_settings["chain_timeout"]      = data.get("chain_timeout", 50.0)
+    detection_settings["chain_auto_advance"] = data.get("chain_auto_advance", True)
+    detection_settings["chain_pause_time"]   = data.get("chain_pause_time", 10.0)
     return jsonify({"success": True, "chain_data": data})
 
 
@@ -865,12 +647,11 @@ def delete_chain():
 
 @app.route("/train/start", methods=["POST"])
 def train_start():
-    global training_active
-    if training_active:
-        return jsonify({"error": "トレーニングはすでに実行中です"}), 400
+    with _training_lock:
+        if training_active:
+            return jsonify({"error": "トレーニングはすでに実行中です"}), 400
     config = request.json or {}
-    t = threading.Thread(target=_training_worker, args=(config,), daemon=True)
-    t.start()
+    threading.Thread(target=_training_worker, args=(config,), daemon=True).start()
     return jsonify({"success": True, "message": "BILTトレーニングを開始しました"})
 
 
@@ -882,14 +663,13 @@ def train_status():
 
 @app.route("/autotrain/start", methods=["POST"])
 def autotrain_start():
-    global autotrain_active
-    if autotrain_active:
-        return jsonify({"error": "オートトレーニングはすでに実行中です"}), 400
+    with _training_lock:
+        if autotrain_active:
+            return jsonify({"error": "オートトレーニングはすでに実行中です"}), 400
     config = request.json or {}
     if not config.get("model_path") or not Path(config["model_path"]).exists():
         return jsonify({"error": "モデルパスが無効です"}), 400
-    t = threading.Thread(target=_autotrain_worker, args=(config,), daemon=True)
-    t.start()
+    threading.Thread(target=_autotrain_worker, args=(config,), daemon=True).start()
     return jsonify({"success": True, "message": "オートトレーニングを開始しました"})
 
 
@@ -907,7 +687,7 @@ def relabel_start():
     try:
         model = BILT(model_path)
         if config.get("backup_enabled", True):
-            _backup_project(config["project_path"])
+            backup_project(config["project_path"])
         _auto_label(model, config)
         return jsonify({"success": True, "message": "リラベリングが完了しました"})
     except Exception as exc:
@@ -953,11 +733,8 @@ def create_project():
 
 @atexit.register
 def _cleanup():
-    global detection_active
-    detection_active = False
-    with _camera_lock:
-        if _camera:
-            _camera.release()
+    _detection_event.clear()
+    camera.release()
     logger.info("BILTサービス: クリーンアップ完了")
 
 
@@ -973,11 +750,8 @@ if __name__ == "__main__":
     logger.info("モデルディレクトリ: %s", dirs.models)
     logger.info("=" * 60)
 
-    # 検出ループを事前起動（カメラ未選択時はフレームを返さない）
-    detection_thread = threading.Thread(
-        target=_detection_loop, daemon=True, name="bilt-detect"
-    )
-    detection_thread.start()
+    # NOTE: Detection thread is started on-demand via /api/detection/start
+    # to avoid wasted CPU when no model is loaded.
 
     app.run(host="127.0.0.1", port=port, debug=False,
             threaded=True, use_reloader=False)

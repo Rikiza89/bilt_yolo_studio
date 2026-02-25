@@ -63,19 +63,29 @@ class ServiceClient:
         """エンジン種別とエンドポイントパスからURLを構築する。"""
         return f"{self._urls[engine]}/{endpoint.lstrip('/')}"
 
-    def _get(
+    def _safe_request(
         self,
+        method:   str,
         engine:   EngineType,
         endpoint: str,
+        data:     Optional[Dict[str, Any]] = None,
         timeout:  Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        GETリクエストを送信する。
-        接続エラー時は {'error': str} を返し、例外は送出しない。
+        Send an HTTP request with unified error handling.
+
+        Connection / timeout / HTTP errors are caught and returned as
+        ``{'error': str}`` rather than raising exceptions, so the UI
+        never crashes when a backend service is unavailable.
         """
         url = self._url(engine, endpoint)
         try:
-            resp = self._session.get(url, timeout=timeout or self._timeout)
+            if method == "GET":
+                resp = self._session.get(url, timeout=timeout or self._timeout)
+            else:
+                resp = self._session.post(
+                    url, json=data or {}, timeout=timeout or self._timeout,
+                )
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.ConnectionError:
@@ -88,8 +98,17 @@ class ServiceClient:
             except Exception:
                 return {"error": f"HTTP {exc.response.status_code}"}
         except Exception as exc:
-            logger.exception("予期しないエラー: GET %s", url)
+            logger.exception("予期しないエラー: %s %s", method, url)
             return {"error": str(exc)}
+
+    def _get(
+        self,
+        engine:   EngineType,
+        endpoint: str,
+        timeout:  Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """GETリクエストを送信する。"""
+        return self._safe_request("GET", engine, endpoint, timeout=timeout)
 
     def _post(
         self,
@@ -98,31 +117,8 @@ class ServiceClient:
         data:     Optional[Dict[str, Any]] = None,
         timeout:  Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        POSTリクエストを送信する。
-        接続エラー時は {'error': str} を返し、例外は送出しない。
-        """
-        url = self._url(engine, endpoint)
-        try:
-            resp = self._session.post(
-                url,
-                json=data or {},
-                timeout=timeout or self._timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.ConnectionError:
-            return {"error": f"{engine.value} サービスに接続できません。起動していますか？"}
-        except requests.exceptions.Timeout:
-            return {"error": f"{engine.value} サービスへのリクエストがタイムアウトしました"}
-        except requests.exceptions.HTTPError as exc:
-            try:
-                return exc.response.json()
-            except Exception:
-                return {"error": f"HTTP {exc.response.status_code}"}
-        except Exception as exc:
-            logger.exception("予期しないエラー: POST %s", url)
-            return {"error": str(exc)}
+        """POSTリクエストを送信する。"""
+        return self._safe_request("POST", engine, endpoint, data=data, timeout=timeout)
 
     # ──────────────────────────────────────────
     # ヘルスチェック

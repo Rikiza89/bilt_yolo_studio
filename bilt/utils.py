@@ -1,7 +1,7 @@
 import logging
 import torch
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from PIL import Image, ImageDraw, ImageFont
 
 # Configure logging
@@ -45,7 +45,7 @@ def parse_yolo_label(
         return annotations
     
     try:
-        with open(label_path, 'r') as f:
+        with open(label_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -96,7 +96,7 @@ def parse_yolo_label(
     return annotations
 
 
-def load_yaml_classes(yaml_path: Path) -> List[str]:
+def load_yaml_classes(yaml_path: Path) -> Optional[List[str]]:
     """Load class names from YOLO data.yaml file."""
     try:
         import yaml
@@ -108,7 +108,7 @@ def load_yaml_classes(yaml_path: Path) -> List[str]:
         return None
     
     try:
-        with open(yaml_path, 'r') as f:
+        with open(yaml_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
         
         if 'names' in data:
@@ -162,10 +162,10 @@ def draw_detections(image: Image.Image, detections: List[Dict]) -> Image.Image:
         
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-        except:
+        except (OSError, IOError):
             try:
                 font = ImageFont.truetype("arial.ttf", 16)
-            except:
+            except (OSError, IOError):
                 font = ImageFont.load_default()
         
         # Get text size

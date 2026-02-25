@@ -9,6 +9,9 @@ shared — UIとバックエンドサービス間の共通モジュールパッ�
 
 依存ライブラリ: Python標準ライブラリ + requests のみ。
 AGPLライブラリ (bilt, ultralytics) はここでは一切インポートしない。
+
+NOTE: camera_utils と detection_common は cv2 に依存するため、
+UIプロセスからはインポートしないこと。サービスプロセスのみで使用する。
 """
 
 from shared.contracts import (
@@ -33,4 +36,6 @@ __all__ = [
     "TaskType",
     "TrainingConfig",
     "get_base_dir",
+    # camera_utils and detection_common are imported directly
+    # by service processes, not re-exported here (cv2 dependency).
 ]

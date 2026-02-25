@@ -287,8 +287,12 @@ class StudioMainWindow(QMainWindow):
                 f"{self._ui_url}/api/health", timeout=2
             ) as resp:
                 data = json.loads(resp.read())
-                bilt_ok = data.get("bilt", False)
-                yolo_ok = data.get("yolo", False)
+                # BUG FIX: Health endpoint returns dicts like {"status": "healthy"},
+                # not booleans. Check the "status" key inside each dict.
+                bilt_data = data.get("bilt", {})
+                yolo_data = data.get("yolo", {})
+                bilt_ok = isinstance(bilt_data, dict) and bilt_data.get("status") in ("healthy", "ok")
+                yolo_ok = isinstance(yolo_data, dict) and yolo_data.get("status") in ("healthy", "ok")
         except Exception:
             bilt_ok = yolo_ok = False
 

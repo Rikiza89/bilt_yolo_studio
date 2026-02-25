@@ -45,7 +45,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from shared.contracts import AppDirectories, Ports
-os.environ.setdefault("QT_QPA_PLATFORM", "windows")
+
 # ──────────────────────────────────────────────
 # ロギング設定
 # ──────────────────────────────────────────────
@@ -277,6 +277,11 @@ def main() -> int:
             port=Ports.YOLO_SERVICE,
         ),
     ]
+
+    # BUG FIX: Populate _services_global so the signal handler can
+    # actually clean up services on SIGINT/SIGTERM.
+    global _services_global
+    _services_global = services
 
     for svc in services:
         if not svc.start():

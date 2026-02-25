@@ -61,8 +61,8 @@ class DetectionModel:
         
         # Save class mapping separately
         class_map_path = save_path.parent / f"{save_path.stem}_classes.json"
-        with open(class_map_path, 'w') as f:
-            json.dump({i: name for i, name in enumerate(class_names)}, f, indent=2)
+        with open(class_map_path, 'w', encoding='utf-8') as f:
+            json.dump({i: name for i, name in enumerate(class_names)}, f, indent=2, ensure_ascii=False)
     
     @staticmethod
     def load(model_path: Path) -> Tuple[nn.Module, List[str]]:
@@ -74,7 +74,9 @@ class DetectionModel:
         
         logger.info(f"Loading model from {model_path}")
         
-        checkpoint = torch.load(model_path, map_location='cpu')
+        # Security: Use weights_only=True to prevent arbitrary code execution
+        # via pickle deserialization of untrusted model files.
+        checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
         
         num_classes = checkpoint['num_classes']
         class_names = checkpoint['class_names']

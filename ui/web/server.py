@@ -13,6 +13,7 @@ BILT/YOLOバックエンドサービスへのプロキシ兼オーケストレ�
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
@@ -56,6 +57,12 @@ app = Flask(
 # ──────────────────────────────────────────────
 _client: ServiceClient | None = None
 _dirs:   AppDirectories | None = None
+
+# DRY: 1x1 transparent PNG for empty-frame fallback (used by preview & frame endpoints)
+_EMPTY_1X1_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
 
 
 def init_server(dirs: AppDirectories) -> None:
@@ -218,12 +225,7 @@ def api_camera_preview() -> Response:
     engine = _engine_from_query()
     jpeg   = _svc().get_raw(engine, "/api/camera/preview")
     if jpeg is None:
-        import base64
-        empty = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
-            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
-        )
-        return Response(empty, mimetype="image/png")
+        return Response(_EMPTY_1X1_PNG, mimetype="image/png")
     return Response(jpeg, mimetype="image/jpeg")
 
 
@@ -282,13 +284,7 @@ def api_frame_latest() -> Response:
     engine = _engine_from_query()
     jpeg = _svc().get_raw(engine, "/api/frame/latest")
     if jpeg is None:
-        # フレームがない場合は透明1x1 PNG を返す（エラー防止）
-        import base64
-        empty = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
-            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
-        )
-        return Response(empty, mimetype="image/png")
+        return Response(_EMPTY_1X1_PNG, mimetype="image/png")
     return Response(jpeg, mimetype="image/jpeg")
 
 
@@ -406,8 +402,9 @@ def api_projects_create() -> Response:
     ローカルディレクトリを作成するのみ。
     実際のアノテーションファイルはUIが管理する。
     """
+    from werkzeug.utils import secure_filename as _sf
     data = request.json or {}
-    name = data.get("name", "").strip()
+    name = _sf(data.get("name", "").strip())
     if not name:
         return jsonify({"error": "プロジェクト名が空です"}), 400
 
@@ -421,7 +418,11 @@ def api_projects_create() -> Response:
 @app.route("/api/projects/<project_name>/images")
 def api_project_images(project_name: str) -> Response:
     """プロジェクト内の画像ファイル一覧を返す。"""
-    proj_path = Path(_dirs.projects) / project_name / "images"  # type: ignore[union-attr]
+    from werkzeug.utils import secure_filename as _sf
+    safe_name = _sf(project_name)
+    if not safe_name:
+        return jsonify({"images": []})
+    proj_path = Path(_dirs.projects) / safe_name / "images"  # type: ignore[union-attr]
     if not proj_path.exists():
         return jsonify({"images": []})
     images = [f.name for f in proj_path.iterdir() if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}]
@@ -434,49 +435,72 @@ def api_project_images(project_name: str) -> Response:
 def api_project_image(project_name: str, filename: str) -> Response:
     """アノテーション用の画像ファイルを返す。"""
     from flask import send_from_directory
-    img_dir = Path(_dirs.projects) / project_name / "images"  # type: ignore[union-attr]
-    return send_from_directory(str(img_dir), filename)
+    from werkzeug.utils import secure_filename as _sf
+    safe_project = _sf(project_name)
+    safe_file    = _sf(filename)
+    if not safe_project or not safe_file:
+        return jsonify({"error": "Invalid path parameter"}), 400
+    img_dir = Path(_dirs.projects) / safe_project / "images"  # type: ignore[union-attr]
+    return send_from_directory(str(img_dir), safe_file)
 
 
 @app.route("/api/projects/<project_name>/label/<filename>")
 def api_project_label_get(project_name: str, filename: str) -> Response:
     """YOLOフォーマットのラベルファイルを返す。存在しない場合は空テキストを返す。"""
-    label_name = Path(filename).stem + ".txt"
-    label_path = Path(_dirs.projects) / project_name / "labels" / label_name  # type: ignore[union-attr]
+    from werkzeug.utils import secure_filename as _sf
+    safe_project = _sf(project_name)
+    safe_file    = _sf(filename)
+    if not safe_project or not safe_file:
+        return Response("", mimetype="text/plain")
+    label_name = Path(safe_file).stem + ".txt"
+    label_path = Path(_dirs.projects) / safe_project / "labels" / label_name  # type: ignore[union-attr]
     if not label_path.exists():
-        return Response("", mimetype="text/plain")  # JSON ではなく空テキストを返す
-    return Response(label_path.read_text(), mimetype="text/plain")
+        return Response("", mimetype="text/plain")
+    return Response(label_path.read_text(encoding="utf-8"), mimetype="text/plain")
 
 
 @app.route("/api/projects/<project_name>/label/<filename>", methods=["POST"])
 def api_project_label_save(project_name: str, filename: str) -> Response:
     """YOLOフォーマットのラベルファイルを保存する。"""
-    label_name = Path(filename).stem + ".txt"
-    label_path = Path(_dirs.projects) / project_name / "labels" / label_name  # type: ignore[union-attr]
+    from werkzeug.utils import secure_filename as _sf
+    safe_project = _sf(project_name)
+    safe_file    = _sf(filename)
+    if not safe_project or not safe_file:
+        return jsonify({"error": "Invalid path parameter"}), 400
+    label_name = Path(safe_file).stem + ".txt"
+    label_path = Path(_dirs.projects) / safe_project / "labels" / label_name  # type: ignore[union-attr]
     label_path.parent.mkdir(parents=True, exist_ok=True)
     content = request.data.decode("utf-8")
-    label_path.write_text(content)
+    label_path.write_text(content, encoding="utf-8")
     return jsonify({"success": True})
 
 
 @app.route("/api/projects/<project_name>/classes")
 def api_project_classes(project_name: str) -> Response:
     """プロジェクトのクラス定義を返す。"""
-    classes_path = Path(_dirs.projects) / project_name / "classes.txt"  # type: ignore[union-attr]
+    from werkzeug.utils import secure_filename as _sf
+    safe_name = _sf(project_name)
+    if not safe_name:
+        return jsonify({"classes": []})
+    classes_path = Path(_dirs.projects) / safe_name / "classes.txt"  # type: ignore[union-attr]
     if not classes_path.exists():
         return jsonify({"classes": []})
-    classes = [line.strip() for line in classes_path.read_text().splitlines() if line.strip()]
+    classes = [line.strip() for line in classes_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     return jsonify({"classes": classes})
 
 
 @app.route("/api/projects/<project_name>/classes", methods=["POST"])
 def api_project_classes_save(project_name: str) -> Response:
     """クラス定義を保存する。"""
+    from werkzeug.utils import secure_filename as _sf
+    safe_name = _sf(project_name)
+    if not safe_name:
+        return jsonify({"error": "Invalid project name"}), 400
     data = request.json or {}
     classes = data.get("classes", [])
-    classes_path = Path(_dirs.projects) / project_name / "classes.txt"  # type: ignore[union-attr]
+    classes_path = Path(_dirs.projects) / safe_name / "classes.txt"  # type: ignore[union-attr]
     classes_path.parent.mkdir(parents=True, exist_ok=True)
-    classes_path.write_text("\n".join(classes))
+    classes_path.write_text("\n".join(classes), encoding="utf-8")
     return jsonify({"success": True})
 
 
@@ -490,11 +514,15 @@ def api_project_upload(project_name: str) -> Response:
     """
     from werkzeug.utils import secure_filename
 
+    safe_project = secure_filename(project_name)
+    if not safe_project:
+        return jsonify({"error": "Invalid project name"}), 400
+
     # 許可する画像拡張子
     ALLOWED = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
     uploaded = []
-    img_dir = Path(_dirs.projects) / project_name / "images"  # type: ignore[union-attr]
+    img_dir = Path(_dirs.projects) / safe_project / "images"  # type: ignore[union-attr]
     img_dir.mkdir(parents=True, exist_ok=True)
 
     for file in request.files.getlist("files"):

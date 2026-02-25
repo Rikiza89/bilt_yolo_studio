@@ -11,10 +11,6 @@ UIクライアントはエンジン種別のみを切り替えて同じコード
   - segment  : セグメンテーション (ポリゴンマスク)
   - obb      : 方向付きバウンディングボックス
   - pose     : 姿勢推定 (キーポイント)
-
-モデルフォーマット:
-  - .pt  (PyTorch / Ultralytics ネイティブ)
-  - .onnx, .engine 等は Ultralytics が自動処理
 """
 
 from __future__ import annotations
@@ -45,10 +41,20 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 # Ultralytics のインポート (AGPL-3.0)
-# このインポートはこのプロセス内にのみ存在する
 from ultralytics import YOLO  # noqa: E402 (AGPL)
 
+from shared.camera_utils import CameraManager             # noqa: E402
 from shared.contracts import AppDirectories, Ports, TaskType  # noqa: E402
+from shared.detection_common import (                      # noqa: E402
+    acknowledge_chain_error,
+    backup_project,
+    make_default_chain_state,
+    make_default_detection_settings,
+    make_default_detection_stats,
+    process_chain,
+    sanitize_detection_settings,
+    start_chain,
+)
 
 # ──────────────────────────────────────────────
 # ログ設定
@@ -76,99 +82,36 @@ dirs.ensure_all()
 # ──────────────────────────────────────────────
 # グローバル状態
 # ──────────────────────────────────────────────
+
+# Thread-safe camera manager (DRY: shared with BILT service)
+camera = CameraManager()
+
+# Model state — protected by _model_lock
+_model_lock = threading.Lock()
 current_model: Optional[YOLO] = None
-model_info: Dict[str, Any]    = {
+model_info: Dict[str, Any] = {
     "name": None, "classes": [], "loaded": False, "task": "detect"
 }
 
-_camera: Optional[cv2.VideoCapture] = None
-_camera_index: Optional[int]        = None
-_camera_lock = threading.Lock()
-
-detection_active  = False
+# Detection loop control — threading.Event for safe cross-thread signaling
+_detection_event = threading.Event()
 detection_thread: Optional[threading.Thread] = None
-latest_frame:  Optional[np.ndarray] = None
-frame_lock     = threading.Lock()
+latest_frame: Optional[np.ndarray] = None
+frame_lock = threading.Lock()
 counter_triggered: Dict[str, bool] = {}
 
+# Training state — protected by _training_lock
+_training_lock = threading.Lock()
 training_active  = False
 autotrain_active = False
 
-detection_settings: Dict[str, Any] = {
-    "conf": 0.60, "iou": 0.10, "max_det": 10,
-    "classes": None, "counter_mode": False,
-    "save_images": False, "dataset_capture": False,
-    "project_folder": "",
-    "chain_mode": False, "chain_steps": [],
-    "chain_timeout": 50.0, "chain_pause_time": 10.0,
-    "chain_auto_advance": True,
-    "task": "detect",  # YOLOサービス固有: タスク種別
-}
-
+# Detection settings / stats / chain state (DRY: shared factories)
+detection_settings: Dict[str, Any] = make_default_detection_settings(
+    extra={"task": "detect"}  # YOLOサービス固有: タスク種別
+)
 object_counters: Dict[str, int] = {}
-detection_stats: Dict[str, Any] = {
-    "total_detections": 0, "fps": 0.0, "last_detection_time": None,
-    "detections_per_frame": 0, "current_classes": [],
-}
-
-chain_state: Dict[str, Any] = {
-    "active": False, "current_step": 0,
-    "step_start_time": None, "completed_cycles": 0,
-    "failed_steps": 0, "step_history": [],
-    "current_detections": {}, "last_step_result": None,
-    "cycle_pause": False, "cycle_pause_start": None,
-    "waiting_for_ack": False, "error_message": None,
-    "wrong_object": None, "error_step": None,
-}
-
-
-# ══════════════════════════════════════════════
-# カメラユーティリティ (BILTサービスと同一実装)
-# ══════════════════════════════════════════════
-
-def _get_available_cameras() -> List[Dict[str, Any]]:
-    cameras = []
-    for idx in range(4):
-        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY)
-        if cap.isOpened():
-            cameras.append({
-                "index":  idx,
-                "width":  int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                "fps":    cap.get(cv2.CAP_PROP_FPS),
-                "name":   f"Camera {idx}",
-            })
-            cap.release()
-    return cameras
-
-
-def _init_camera(index: int) -> bool:
-    global _camera, _camera_index
-    with _camera_lock:
-        if _camera:
-            _camera.release()
-        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-        cap = cv2.VideoCapture(index, backend)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(index)
-        if not cap.isOpened():
-            return False
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 960)
-        cap.set(cv2.CAP_PROP_FPS,          30)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        _camera       = cap
-        _camera_index = index
-        logger.info("カメラ %d を初期化しました", index)
-        return True
-
-
-def _grab_frame() -> Optional[np.ndarray]:
-    with _camera_lock:
-        if _camera is None or not _camera.isOpened():
-            return None
-        ret, frame = _camera.read()
-        return frame if ret else None
+detection_stats: Dict[str, Any] = make_default_detection_stats()
+chain_state: Dict[str, Any] = make_default_chain_state()
 
 
 # ══════════════════════════════════════════════
@@ -179,11 +122,6 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
     """
     フレームに対してYOLO推論を実行し、統一フォーマットのリストを返す。
     タスク種別 (detect/segment/obb/pose) に応じて結果を変換する。
-
-    Returns:
-        検出結果のリスト。各要素は以下のキーを持つ:
-          class_id, class_name, score, bbox,
-          points (segment/obb), keypoints (pose)
     """
     if current_model is None:
         return []
@@ -201,9 +139,9 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
     if not results_list:
         return detections
 
-    results  = results_list[0]
-    names    = current_model.names
-    task     = detection_settings.get("task", "detect")
+    results = results_list[0]
+    names   = current_model.names
+    task    = detection_settings.get("task", "detect")
 
     # ── バウンディングボックス (全タスク共通) ──
     if results.boxes is not None:
@@ -224,7 +162,6 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
     if task == "segment" and results.masks is not None:
         for i, mask in enumerate(results.masks.xy):
             if i < len(detections):
-                # mask は (N, 2) の numpy 配列
                 detections[i]["points"] = [
                     {"x": float(p[0]), "y": float(p[1])} for p in mask
                 ]
@@ -256,7 +193,6 @@ def _draw_detections(frame: np.ndarray, dets: List[Dict]) -> np.ndarray:
         (200, 0, 255), (0, 128, 255), (255, 0, 128), (128, 255, 0),
     ]
     task = detection_settings.get("task", "detect")
-    h, w = frame.shape[:2]
 
     for det in dets:
         cid   = det.get("class_id", 0)
@@ -290,60 +226,6 @@ def _draw_detections(frame: np.ndarray, dets: List[Dict]) -> np.ndarray:
 
 
 # ══════════════════════════════════════════════
-# チェーン検出 (BILTサービスと共通ロジック)
-# ══════════════════════════════════════════════
-
-def _process_chain(dets: List[Dict]) -> None:
-    steps = detection_settings["chain_steps"]
-    if not steps or not chain_state["active"]:
-        return
-
-    now = time.time()
-
-    if chain_state["cycle_pause"]:
-        if now - chain_state["cycle_pause_start"] >= detection_settings["chain_pause_time"]:
-            chain_state.update({
-                "cycle_pause": False, "cycle_pause_start": None,
-                "current_step": 0, "step_start_time": now,
-            })
-        return
-
-    if chain_state["waiting_for_ack"]:
-        return
-
-    step_idx = chain_state["current_step"]
-    if step_idx >= len(steps):
-        chain_state.update({
-            "completed_cycles": chain_state["completed_cycles"] + 1,
-            "cycle_pause": True, "cycle_pause_start": now,
-        })
-        return
-
-    step    = steps[step_idx]
-    present: Dict[str, int] = {}
-    for d in dets:
-        present[d["class_name"]] = present.get(d["class_name"], 0) + 1
-
-    required: Dict[str, int] = step.get("classes", {})
-
-    for cls in present:
-        if cls not in required:
-            chain_state.update({
-                "waiting_for_ack": True,
-                "error_step":      step_idx,
-                "error_message":   f"ステップ '{step['name']}' で不正なオブジェクト '{cls}' を検出",
-                "wrong_object":    cls,
-                "failed_steps":    chain_state["failed_steps"] + 1,
-            })
-            return
-
-    if all(present.get(cls, 0) >= cnt for cls, cnt in required.items()):
-        chain_state["current_step"]     = step_idx + 1
-        chain_state["step_start_time"]  = now
-        chain_state["last_step_result"] = "success"
-
-
-# ══════════════════════════════════════════════
 # 検出ループ
 # ══════════════════════════════════════════════
 
@@ -355,20 +237,27 @@ def _detection_loop() -> None:
     fps_time     = time.time()
     frame_period = 1.0 / 30
 
-    while detection_active:
+    while _detection_event.is_set():
         t0 = time.time()
         try:
-            frame = _grab_frame()
+            frame = camera.grab_frame()
             if frame is None:
-                if _camera_index is not None:
-                    logger.warning("検出ループ: フレーム取得失敗。カメラを再初期化します (index=%d)", _camera_index)
-                    _init_camera(_camera_index)
+                if camera.camera_index is not None:
+                    logger.warning(
+                        "検出ループ: フレーム取得失敗。カメラを再初期化します (index=%d)",
+                        camera.camera_index,
+                    )
+                    camera.init_camera(camera.camera_index)
                 time.sleep(0.1)
                 continue
 
             annotated = frame.copy()
 
-            if current_model and model_info["loaded"]:
+            with _model_lock:
+                model = current_model
+                loaded = model_info["loaded"]
+
+            if model and loaded:
                 yolo_dets = _yolo_predict(frame)
 
                 if detection_settings["counter_mode"] and not detection_settings["chain_mode"]:
@@ -378,14 +267,15 @@ def _detection_loop() -> None:
                             object_counters[name] = object_counters.get(name, 0) + 1
                             counter_triggered[name] = True
 
+                # Chain mode (DRY: shared logic)
                 if detection_settings["chain_mode"]:
-                    _process_chain(yolo_dets)
+                    process_chain(yolo_dets, detection_settings, chain_state)
 
                 annotated = _draw_detections(frame.copy(), yolo_dets)
                 detection_stats["total_detections"]     += len(yolo_dets)
-                detection_stats["detections_per_frame"] = len(yolo_dets)
-                detection_stats["current_classes"]      = list({d["class_name"] for d in yolo_dets})
-                detection_stats["last_detection_time"]  = datetime.now().isoformat()
+                detection_stats["detections_per_frame"]  = len(yolo_dets)
+                detection_stats["current_classes"]       = list({d["class_name"] for d in yolo_dets})
+                detection_stats["last_detection_time"]   = datetime.now().isoformat()
 
             fps_counter += 1
             if time.time() - fps_time >= 1.0:
@@ -411,11 +301,11 @@ def _training_worker(config: Dict[str, Any]) -> None:
     """バックグラウンドスレッドでYOLOトレーニングを実行する。"""
     global training_active
     try:
-        training_active = True
+        with _training_lock:
+            training_active = True
         model_name = config.get("model_name") or config.get("model", "yolov8n.pt")
         task       = config.get("task_type", "detect")
 
-        # scratch の場合は Ultralytics のプリセットを使用
         if model_name == "scratch":
             model_name = {
                 "detect":  "yolov8n.pt",
@@ -430,7 +320,7 @@ def _training_worker(config: Dict[str, Any]) -> None:
         save_dir = Path(config.get("project_path", str(_ROOT / "runs")))
         run_name = f"yolo_{task}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        results = yolo.train(
+        yolo.train(
             data       = config["data_yaml"],
             epochs     = int(config.get("epochs", 100)),
             batch      = int(config.get("batch_size", config.get("batch", 8))),
@@ -443,7 +333,6 @@ def _training_worker(config: Dict[str, Any]) -> None:
             verbose    = True,
         )
 
-        # カスタム名で保存
         custom = config.get("custom_save_name")
         if custom:
             if not custom.endswith(".pt"):
@@ -457,25 +346,25 @@ def _training_worker(config: Dict[str, Any]) -> None:
     except Exception:
         logger.error("YOLOトレーニングエラー:\n%s", traceback.format_exc())
     finally:
-        training_active = False
+        with _training_lock:
+            training_active = False
 
 
 def _autotrain_worker(config: Dict[str, Any]) -> None:
     global autotrain_active
     try:
-        autotrain_active = True
+        with _training_lock:
+            autotrain_active = True
         model_path = config["model_path"]
         task       = config.get("task_type", "detect")
 
         yolo = YOLO(model_path)
 
         if config.get("backup_enabled", True):
-            _backup_project(config["project_path"])
+            backup_project(config["project_path"])
 
-        # YOLO でオートラベリング
         _auto_label_yolo(yolo, config, task)
 
-        # 再トレーニング
         yolo.train(
             data    = config["data_yaml"],
             epochs  = int(config.get("epochs", 50)),
@@ -492,7 +381,8 @@ def _autotrain_worker(config: Dict[str, Any]) -> None:
     except Exception:
         logger.error("YOLOオートトレーニングエラー:\n%s", traceback.format_exc())
     finally:
-        autotrain_active = False
+        with _training_lock:
+            autotrain_active = False
 
 
 def _auto_label_yolo(
@@ -544,9 +434,16 @@ def _auto_label_yolo(
                         lines.append(f"{int(box.cls[0])} {pts_str}")
 
                 elif task == "obb" and res.obb is not None:
-                    for obb in res.obb.xyxyxyxy:
+                    # BUG FIX: Use per-OBB class instead of always using
+                    # the first box's class for all detections.
+                    for i, obb in enumerate(res.obb.xyxyxyxy):
                         pts = obb.cpu().numpy().reshape(-1, 2)
-                        cls  = int(res.boxes[0].cls[0]) if res.boxes else 0
+                        if res.obb.cls is not None and i < len(res.obb.cls):
+                            cls = int(res.obb.cls[i])
+                        elif res.boxes is not None and i < len(res.boxes):
+                            cls = int(res.boxes[i].cls[0])
+                        else:
+                            cls = 0
                         pts_str = " ".join(
                             f"{p[0]/img_w:.6f} {p[1]/img_h:.6f}" for p in pts
                         )
@@ -555,17 +452,6 @@ def _auto_label_yolo(
                 lbl.write_text("\n".join(lines), encoding="utf-8")
             except Exception:
                 logger.warning("YOLOオートラベリング失敗: %s", img_file)
-
-
-def _backup_project(project_path: str) -> None:
-    ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bk_dir = Path(project_path) / f"backup_{ts}"
-    for split in ("train", "val"):
-        for sub in ("images", "labels"):
-            src = Path(project_path) / split / sub
-            if src.exists():
-                shutil.copytree(str(src), str(bk_dir / split / sub))
-    logger.info("バックアップ作成: %s", bk_dir)
 
 
 # ══════════════════════════════════════════════
@@ -583,7 +469,6 @@ def health():
 def get_available_models():
     task_type = (request.json or {}).get("task_type", "detect")
 
-    # タスク別モデルサフィックス
     suffixes: Dict[str, List[str]] = {
         "detect":  [".pt"],
         "segment": ["-seg.pt", ".pt"],
@@ -592,7 +477,6 @@ def get_available_models():
     }
     compatible_sfx = suffixes.get(task_type, [".pt"])
 
-    # スクラッチ (Ultralytics プリセット自動DL)
     preset = {
         "detect":  "yolov8n.pt",
         "segment": "yolov8n-seg.pt",
@@ -611,7 +495,6 @@ def get_available_models():
         for f in models_dir.iterdir():
             if f.suffix not in (".pt", ".onnx", ".engine"):
                 continue
-            # タスク互換性チェック (サフィックスベース)
             compatible = any(f.name.endswith(sfx.lstrip(".") if sfx.startswith(".") else sfx)
                              for sfx in compatible_sfx)
             models.append({
@@ -630,17 +513,17 @@ def load_model():
     path = Path(dirs.models) / name
     try:
         yolo = YOLO(str(path) if path.exists() else name)
-        current_model = yolo
-        # タスク自動検出
         task = getattr(yolo, "task", "detect") or "detect"
-        detection_settings["task"] = task
-        model_info = {
-            "name":        name,
-            "classes":     list(yolo.names.values()) if yolo.names else [],
-            "loaded":      True,
-            "class_count": len(yolo.names) if yolo.names else 0,
-            "task":        task,
-        }
+        with _model_lock:
+            current_model = yolo
+            detection_settings["task"] = task
+            model_info = {
+                "name":        name,
+                "classes":     list(yolo.names.values()) if yolo.names else [],
+                "loaded":      True,
+                "class_count": len(yolo.names) if yolo.names else 0,
+                "task":        task,
+            }
         logger.info("YOLOモデルをロードしました: %s (タスク: %s)", name, task)
         return jsonify({"success": True, "model_info": model_info})
     except Exception as exc:
@@ -653,54 +536,45 @@ def model_info_route():
     return jsonify({"success": True, "model_info": model_info})
 
 
-# ── カメラ管理 ─────────────────────────────────
+# ── カメラ管理 (DRY: CameraManager) ──────────────
 
 @app.route("/api/cameras")
 def get_cameras():
-    return jsonify({"success": True, "cameras": _get_available_cameras()})
+    return jsonify({"success": True, "cameras": camera.get_available_cameras()})
 
 
 @app.route("/api/camera/select", methods=["POST"])
 def select_camera():
-    idx = int((request.json or {}).get("camera_index", 0))
-    return jsonify({"success": _init_camera(idx)})
+    try:
+        idx = int((request.json or {}).get("camera_index", 0))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "camera_index が無効です"}), 400
+    return jsonify({"success": camera.init_camera(idx)})
 
 
 @app.route("/api/camera/resolution", methods=["POST"])
 def set_camera_resolution():
     data = request.json or {}
-    w, h = int(data.get("width", 1280)), int(data.get("height", 960))
-    with _camera_lock:
-        if _camera and _camera.isOpened():
-            _camera.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
-            _camera.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    try:
+        w, h = int(data.get("width", 1280)), int(data.get("height", 960))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "解像度パラメータが無効です"}), 400
+    camera.set_resolution(w, h)
     return jsonify({"success": True, "width": w, "height": h})
 
 
 @app.route("/api/camera/info")
 def camera_info():
-    with _camera_lock:
-        if _camera and _camera.isOpened():
-            return jsonify({"success": True, "info": {
-                "index":  _camera_index,
-                "width":  int(_camera.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                "height": int(_camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                "fps":    _camera.get(cv2.CAP_PROP_FPS),
-            }})
+    info = camera.get_info()
+    if info:
+        return jsonify({"success": True, "info": info})
     return jsonify({"success": False, "error": "カメラが初期化されていません"})
 
 
 @app.route("/api/camera/preview")
 def camera_preview():
-    """
-    検出オーバーレイなしの生フレームをJPEGで返す。
-    カメラが閉じていた場合、_camera_index が既知であれば再初期化する。
-    """
-    frame = _grab_frame()
-    if frame is None and _camera_index is not None:
-        _init_camera(_camera_index)
-        import time as _time; _time.sleep(0.1)
-        frame = _grab_frame()
+    """検出オーバーレイなしの生フレームをJPEGで返す。"""
+    frame = camera.grab_frame_with_retry()
     if frame is None:
         frame = np.zeros((480, 640, 3), np.uint8)
     ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -711,12 +585,7 @@ def camera_preview():
 
 @app.route("/api/camera/snapshot", methods=["POST"])
 def camera_snapshot():
-    """
-    現在のカメラフレームをプロジェクトの images フォルダに保存する。
-
-    _grab_frame() が None を返した場合、_camera_index が既知であれば
-    再初期化してリトライする。
-    """
+    """現在のカメラフレームをプロジェクトの images フォルダに保存する。"""
     data         = request.json or {}
     project_name = data.get("project_name", "").strip()
     filename     = data.get("filename", "").strip()
@@ -724,14 +593,7 @@ def camera_snapshot():
     if not project_name:
         return jsonify({"success": False, "error": "project_name が指定されていません"}), 400
 
-    frame = _grab_frame()
-
-    if frame is None and _camera_index is not None:
-        logger.warning("スナップショット: カメラが閉じています。再初期化 (index=%d)", _camera_index)
-        if _init_camera(_camera_index):
-            import time as _time
-            _time.sleep(0.15)
-            frame = _grab_frame()
+    frame = camera.grab_frame_with_retry()
 
     if frame is None:
         return jsonify({"success": False, "error": "カメラが初期化されていません。サイドバーで再接続してください"}), 400
@@ -756,7 +618,9 @@ def camera_snapshot():
 @app.route("/api/detection/settings", methods=["GET", "POST"])
 def det_settings():
     if request.method == "POST":
-        detection_settings.update(request.json or {})
+        # Security: whitelist allowed keys to prevent state injection
+        safe = sanitize_detection_settings(request.json or {})
+        detection_settings.update(safe)
         return jsonify({"success": True, "settings": detection_settings})
     return jsonify({"success": True, "settings": detection_settings})
 
@@ -764,14 +628,15 @@ def det_settings():
 @app.route("/api/detection/start", methods=["POST"])
 def start_detection():
     """モデル未ロードの場合はエラーを返してサイレント失敗を防ぐ。"""
-    global detection_active, detection_thread
-    if current_model is None:
-        return jsonify({
-            "success": False,
-            "error":   "モデルが未ロードです。先にモデルをロードしてください。"
-        }), 400
-    if not detection_active:
-        detection_active = True
+    global detection_thread
+    with _model_lock:
+        if current_model is None:
+            return jsonify({
+                "success": False,
+                "error":   "モデルが未ロードです。先にモデルをロードしてください。"
+            }), 400
+    if not _detection_event.is_set():
+        _detection_event.set()
         if detection_thread is None or not detection_thread.is_alive():
             detection_thread = threading.Thread(
                 target=_detection_loop, daemon=True, name="yolo-detect"
@@ -782,8 +647,7 @@ def start_detection():
 
 @app.route("/api/detection/stop", methods=["POST"])
 def stop_detection():
-    global detection_active
-    detection_active = False
+    _detection_event.clear()
     return jsonify({"success": True})
 
 
@@ -818,7 +682,7 @@ def reset_counters():
     return jsonify({"success": True})
 
 
-# ── チェーン検出 ──────────────────────────────
+# ── チェーン検出 (DRY: shared logic) ──────────
 
 @app.route("/api/chain/status")
 def chain_status_route():
@@ -845,16 +709,7 @@ def chain_status_route():
 def chain_control():
     action = (request.json or {}).get("action", "")
     if action == "start":
-        detection_settings["chain_mode"] = True
-        chain_state.update({
-            "active": True, "current_step": 0,
-            "step_start_time": time.time(), "completed_cycles": 0,
-            "failed_steps": 0, "step_history": [],
-            "current_detections": {}, "last_step_result": None,
-            "cycle_pause": False, "cycle_pause_start": None,
-            "waiting_for_ack": False, "error_message": None,
-            "wrong_object": None, "error_step": None,
-        })
+        start_chain(detection_settings, chain_state)
     elif action == "stop":
         detection_settings["chain_mode"] = False
         chain_state["active"] = False
@@ -878,14 +733,7 @@ def chain_config():
 
 @app.route("/api/chain/acknowledge_error", methods=["POST"])
 def ack_error():
-    if chain_state.get("waiting_for_ack"):
-        chain_state.update({
-            "waiting_for_ack": False, "error_message": None,
-            "wrong_object": None, "last_step_result": None,
-            "step_start_time": time.time(),
-            "current_step": chain_state.get("error_step", chain_state["current_step"]),
-            "error_step": None,
-        })
+    if acknowledge_chain_error(chain_state):
         return jsonify({"success": True})
     return jsonify({"success": False})
 
@@ -915,7 +763,7 @@ def saved_chains():
 
 
 @app.route("/api/chains/save", methods=["POST"])
-def save_chain():
+def save_chain_route():
     data = request.json or {}
     name = secure_filename(data.get("chain_name", "").strip())
     if not name:
@@ -961,9 +809,9 @@ def delete_chain():
 
 @app.route("/train/start", methods=["POST"])
 def train_start():
-    global training_active
-    if training_active:
-        return jsonify({"error": "トレーニングはすでに実行中です"}), 400
+    with _training_lock:
+        if training_active:
+            return jsonify({"error": "トレーニングはすでに実行中です"}), 400
     config = request.json or {}
     threading.Thread(target=_training_worker, args=(config,), daemon=True).start()
     return jsonify({"success": True, "message": "YOLOトレーニングを開始しました"})
@@ -977,9 +825,9 @@ def train_status():
 
 @app.route("/autotrain/start", methods=["POST"])
 def autotrain_start():
-    global autotrain_active
-    if autotrain_active:
-        return jsonify({"error": "オートトレーニングはすでに実行中です"}), 400
+    with _training_lock:
+        if autotrain_active:
+            return jsonify({"error": "オートトレーニングはすでに実行中です"}), 400
     config = request.json or {}
     if not config.get("model_path"):
         return jsonify({"error": "model_path が必要です"}), 400
@@ -1000,7 +848,7 @@ def relabel_start():
     try:
         yolo = YOLO(model_path)
         if config.get("backup_enabled", True):
-            _backup_project(config["project_path"])
+            backup_project(config["project_path"])
         _auto_label_yolo(yolo, config, task)
         return jsonify({"success": True, "message": "YOLOリラベリングが完了しました"})
     except Exception as exc:
@@ -1045,11 +893,8 @@ def create_project():
 
 @atexit.register
 def _cleanup():
-    global detection_active
-    detection_active = False
-    with _camera_lock:
-        if _camera:
-            _camera.release()
+    _detection_event.clear()
+    camera.release()
     logger.info("YOLOサービス: クリーンアップ完了")
 
 
@@ -1061,10 +906,8 @@ if __name__ == "__main__":
     logger.info("サポートタスク: detect / segment / obb / pose")
     logger.info("=" * 60)
 
-    detection_thread = threading.Thread(
-        target=_detection_loop, daemon=True, name="yolo-detect"
-    )
-    detection_thread.start()
+    # NOTE: Detection thread is started on-demand via /api/detection/start
+    # to avoid wasted CPU when no model is loaded.
 
     app.run(host="127.0.0.1", port=port, debug=False,
             threaded=True, use_reloader=False)

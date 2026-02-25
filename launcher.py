@@ -317,9 +317,11 @@ def main() -> int:
         _cleanup(services)
         return 1
 
-    # Wayland/X11 互換性のための環境変数設定
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")     # Linux
-    # macOS / Windows では自動検出されるため設定不要
+    # Platform-specific Qt backend selection (must be set before QApplication)
+    if sys.platform == "win32":
+        os.environ.setdefault("QT_QPA_PLATFORM", "windows")
+    elif sys.platform == "linux":
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
     app = QApplication(sys.argv)
     app.setApplicationName("BILT+YOLO Studio")

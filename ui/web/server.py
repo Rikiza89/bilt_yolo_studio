@@ -140,12 +140,27 @@ def settings_page() -> str:
 
 @app.route("/api/health")
 def api_health() -> Response:
-    """全サービスのヘルスチェックを集約して返す。"""
-    bilt_ok = _svc().health(EngineType.BILT)
-    yolo_ok = _svc().health(EngineType.YOLO)
+    """
+    全サービスのヘルスチェックを集約して返す。
+
+    両サービスへのリクエストをスレッドで並列実行し、
+    直列実行時に比べてレスポンス時間を半減する。
+    タイムアウトは短め (3秒) に設定し、UIのブロッキングを防ぐ。
+    """
+    import concurrent.futures
+
+    def check(engine: EngineType) -> Dict[str, Any]:
+        return _svc()._get(engine, "/health", timeout=3)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f_bilt = ex.submit(check, EngineType.BILT)
+        f_yolo = ex.submit(check, EngineType.YOLO)
+        bilt_result = f_bilt.result()
+        yolo_result = f_yolo.result()
+
     return jsonify({
-        "bilt": bilt_ok,
-        "yolo": yolo_ok,
+        "bilt": bilt_result,
+        "yolo": yolo_result,
         "ui":   True,
     })
 
@@ -191,6 +206,32 @@ def api_camera_select() -> Response:
     """カメラを選択する。"""
     engine = _engine_from_request()
     result = _svc().post(engine, "/api/camera/select", request.json or {})
+    return jsonify(result)
+
+
+@app.route("/api/camera/preview")
+def api_camera_preview() -> Response:
+    """
+    アノテーション用のクリーンなカメラフレームを返す。
+    検出オーバーレイは含まない生フレーム。
+    """
+    engine = _engine_from_query()
+    jpeg   = _svc().get_raw(engine, "/api/camera/preview")
+    if jpeg is None:
+        import base64
+        empty = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        )
+        return Response(empty, mimetype="image/png")
+    return Response(jpeg, mimetype="image/jpeg")
+
+
+@app.route("/api/camera/snapshot", methods=["POST"])
+def api_camera_snapshot() -> Response:
+    """カメラフレームをプロジェクトに保存する。"""
+    engine = _engine_from_request()
+    result = _svc().post(engine, "/api/camera/snapshot", request.json or {})
     return jsonify(result)
 
 
@@ -399,11 +440,11 @@ def api_project_image(project_name: str, filename: str) -> Response:
 
 @app.route("/api/projects/<project_name>/label/<filename>")
 def api_project_label_get(project_name: str, filename: str) -> Response:
-    """YOLOフォーマットのラベルファイルを返す。"""
+    """YOLOフォーマットのラベルファイルを返す。存在しない場合は空テキストを返す。"""
     label_name = Path(filename).stem + ".txt"
     label_path = Path(_dirs.projects) / project_name / "labels" / label_name  # type: ignore[union-attr]
     if not label_path.exists():
-        return jsonify({"labels": []})
+        return Response("", mimetype="text/plain")  # JSON ではなく空テキストを返す
     return Response(label_path.read_text(), mimetype="text/plain")
 
 

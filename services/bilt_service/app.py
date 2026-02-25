@@ -137,6 +137,8 @@ object_counters: Dict[str, int] = {}
 detection_stats: Dict[str, Any] = {
     "total_detections": 0, "fps": 0.0,
     "last_detection_time": None,
+    "detections_per_frame": 0,   # 直近フレームの検出数
+    "current_classes": [],       # 直近フレームで検出されたクラス名リスト
 }
 
 chain_state: Dict[str, Any] = {
@@ -226,7 +228,11 @@ def _detection_loop() -> None:
         try:
             frame = _grab_frame()
             if frame is None:
-                time.sleep(0.05)
+                # カメラが閉じている場合は再初期化を試みる
+                if _camera_index is not None:
+                    logger.warning("検出ループ: フレーム取得失敗。カメラを再初期化します (index=%d)", _camera_index)
+                    _init_camera(_camera_index)
+                time.sleep(0.1)
                 continue
 
             annotated = frame.copy()
@@ -257,7 +263,9 @@ def _detection_loop() -> None:
                 # フレームにアノテーションを描画
                 annotated = _draw_detections(frame.copy(), bilt_dets)
                 detection_stats["total_detections"] += len(bilt_dets)
-                detection_stats["last_detection_time"] = datetime.now().isoformat()
+                detection_stats["detections_per_frame"] = len(bilt_dets)
+                detection_stats["current_classes"]      = list({d["class_name"] for d in bilt_dets})
+                detection_stats["last_detection_time"]  = datetime.now().isoformat()
 
             # FPS計算
             fps_counter += 1
@@ -573,6 +581,70 @@ def camera_info():
 
 # ── 検出制御 ──────────────────────────────────
 
+@app.route("/api/camera/preview")
+def camera_preview():
+    """
+    検出オーバーレイなしの生フレームをJPEGで返す。
+    カメラが閉じていた場合、_camera_index が既知であれば再初期化する。
+    """
+    frame = _grab_frame()
+    if frame is None and _camera_index is not None:
+        _init_camera(_camera_index)
+        import time as _time; _time.sleep(0.1)
+        frame = _grab_frame()
+    if frame is None:
+        frame = np.zeros((480, 640, 3), np.uint8)
+    ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if ret:
+        return Response(buf.tobytes(), mimetype="image/jpeg")
+    return jsonify({"error": "エンコード失敗"}), 500
+
+
+@app.route("/api/camera/snapshot", methods=["POST"])
+def camera_snapshot():
+    """
+    現在のカメラフレームをプロジェクトの images フォルダに保存する。
+
+    _grab_frame() が None を返した場合（カメラが閉じている）、
+    _camera_index が既知であれば再初期化してリトライする。
+    Windows の CAP_DSHOW はスキャン後に一度リリースされるため
+    このリトライが必要になるケースがある。
+    """
+    data         = request.json or {}
+    project_name = data.get("project_name", "").strip()
+    filename     = data.get("filename", "").strip()
+
+    if not project_name:
+        return jsonify({"success": False, "error": "project_name が指定されていません"}), 400
+
+    frame = _grab_frame()
+
+    # カメラが閉じていた場合、既知のインデックスで再初期化してリトライ
+    if frame is None and _camera_index is not None:
+        logger.warning("スナップショット: カメラが閉じています。再初期化 (index=%d)", _camera_index)
+        if _init_camera(_camera_index):
+            import time as _time
+            _time.sleep(0.15)  # カメラが安定するまで待機
+            frame = _grab_frame()
+
+    if frame is None:
+        return jsonify({"success": False, "error": "カメラが初期化されていません。サイドバーで再接続してください"}), 400
+
+    if not filename:
+        filename = datetime.now().strftime("cap_%Y%m%d_%H%M%S_%f")[:-3] + ".jpg"
+
+    img_dir = Path(dirs.projects) / project_name / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    dest = img_dir / filename
+
+    ret = cv2.imwrite(str(dest), frame)
+    if not ret:
+        return jsonify({"success": False, "error": "画像の書き込みに失敗しました"}), 500
+
+    logger.info("スナップショット保存: %s", dest)
+    return jsonify({"success": True, "filename": filename, "path": str(dest)})
+
+
 @app.route("/api/detection/settings", methods=["GET", "POST"])
 def det_settings():
     if request.method == "POST":
@@ -583,7 +655,16 @@ def det_settings():
 
 @app.route("/api/detection/start", methods=["POST"])
 def start_detection():
+    """
+    検出ループを開始する。
+    モデルが未ロードの場合はエラーを返す — サイレントな「検出なし」状態を防ぐ。
+    """
     global detection_active, detection_thread
+    if not model_info["loaded"] or current_model is None:
+        return jsonify({
+            "success": False,
+            "error":   "モデルが未ロードです。先にモデルをロードしてください。"
+        }), 400
     if not detection_active:
         detection_active = True
         if detection_thread is None or not detection_thread.is_alive():

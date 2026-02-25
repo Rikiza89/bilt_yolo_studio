@@ -4,7 +4,7 @@
 {% block body %}
 <div class="d-flex h-100">
 
-  <!-- ─── 左サイドバー: コントロールパネル ─── -->
+  <!-- ─── 左サイドバー ─── -->
   <div class="sidebar d-flex flex-column gap-2">
 
     <!-- エンジン選択 -->
@@ -24,62 +24,73 @@
       <select class="form-select form-select-sm" id="model-select">
         <option value="">— モデルを選択 —</option>
       </select>
+      <!-- タスク選択 (YOLO専用) -->
+      <div id="task-row" style="display:none" class="mt-1">
+        <select class="form-select form-select-sm" id="task-select">
+          <option value="detect">検出 (detect)</option>
+          <option value="segment">セグメント</option>
+          <option value="obb">OBB</option>
+          <option value="pose">ポーズ</option>
+        </select>
+      </div>
       <button class="btn btn-sm btn-outline-secondary w-100 mt-1" id="btn-load-model">
-        <i class="bi bi-box-arrow-in-down"></i> ロード
+        <i class="bi bi-box-arrow-in-down"></i> モデルをロード
       </button>
-      <div id="model-info" class="small text-muted mt-1"></div>
-    </div>
-
-    <!-- タスク選択 (YOLO専用) -->
-    <div id="task-row" style="display:none">
-      <label class="form-label fw-semibold small mb-1">タスク (YOLO)</label>
-      <select class="form-select form-select-sm" id="task-select">
-        <option value="detect">検出 (detect)</option>
-        <option value="segment">セグメント (segment)</option>
-        <option value="obb">OBB</option>
-        <option value="pose">ポーズ (pose)</option>
-      </select>
+      <!-- モデル状態インジケーター -->
+      <div id="model-status" class="small mt-1 px-1 py-1 rounded text-center"
+           style="background:rgba(108,117,125,0.15)">
+        <i class="bi bi-circle-fill" style="font-size:0.5rem;vertical-align:middle"></i>
+        <span id="model-status-text">モデル未ロード</span>
+      </div>
     </div>
 
     <!-- カメラ選択 -->
     <div>
       <label class="form-label fw-semibold small mb-1">カメラ</label>
-      <select class="form-select form-select-sm" id="camera-select"></select>
+      <div class="d-flex gap-1">
+        <select class="form-select form-select-sm" id="camera-select" style="flex:1">
+          <option value="">— カメラ —</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" id="btn-scan-cam" title="カメラ検索">
+          <i class="bi bi-arrow-repeat"></i>
+        </button>
+      </div>
       <div class="d-flex gap-1 mt-1">
-        <select class="form-select form-select-sm" id="res-select">
+        <select class="form-select form-select-sm" id="res-select" style="flex:1">
           <option value="1280x960">1280×960</option>
           <option value="1920x1080">1920×1080</option>
           <option value="640x480">640×480</option>
         </select>
-        <button class="btn btn-sm btn-outline-secondary" id="btn-set-res">
+        <button class="btn btn-sm btn-outline-secondary" id="btn-set-res" title="解像度を適用">
           <i class="bi bi-aspect-ratio"></i>
         </button>
       </div>
+      <div id="cam-status" class="small text-muted mt-1"></div>
     </div>
 
     <hr class="my-1">
 
-    <!-- 信頼度・IOU スライダー -->
+    <!-- スライダー -->
     <div>
       <label class="form-label fw-semibold small mb-1">
-        信頼度閾値: <span id="conf-val">0.60</span>
+        信頼度閾値: <span id="conf-val">0.30</span>
       </label>
       <input type="range" class="form-range" id="slider-conf"
-             min="0.1" max="1.0" step="0.05" value="0.60">
+             min="0.05" max="1.0" step="0.05" value="0.30">
     </div>
     <div>
       <label class="form-label fw-semibold small mb-1">
-        IOU閾値: <span id="iou-val">0.10</span>
+        IOU閾値: <span id="iou-val">0.45</span>
       </label>
       <input type="range" class="form-range" id="slider-iou"
-             min="0.05" max="1.0" step="0.05" value="0.10">
+             min="0.05" max="1.0" step="0.05" value="0.45">
     </div>
     <div>
       <label class="form-label fw-semibold small mb-1">
-        最大検出数: <span id="maxdet-val">10</span>
+        最大検出数: <span id="maxdet-val">20</span>
       </label>
       <input type="range" class="form-range" id="slider-maxdet"
-             min="1" max="100" step="1" value="10">
+             min="1" max="100" step="1" value="20">
     </div>
 
     <hr class="my-1">
@@ -97,12 +108,9 @@
       <input class="form-check-input" type="checkbox" id="chk-dataset">
       <label class="form-check-label small" for="chk-dataset">データセットキャプチャ</label>
     </div>
-
-    <!-- プロジェクト (データセットキャプチャ用) -->
     <div id="project-row" style="display:none">
-      <label class="form-label small mb-1">保存先プロジェクト</label>
       <select class="form-select form-select-sm" id="proj-select">
-        <option value="">— 選択 —</option>
+        <option value="">— プロジェクト —</option>
       </select>
     </div>
 
@@ -115,18 +123,21 @@
     <button class="btn btn-danger btn-sm w-100" id="btn-stop" disabled>
       <i class="bi bi-stop-fill"></i> 停止
     </button>
+    <!-- 操作フィードバック -->
+    <div id="start-error" class="small text-danger text-center" style="min-height:1rem"></div>
 
-  </div><!-- /sidebar -->
-
-  <!-- ─── 中央: ビデオ表示エリア ─── -->
-  <div id="video-wrap">
-    <img id="video-canvas" src="/api/frame/latest?engine=bilt&t=0" alt="frame">
   </div>
 
-  <!-- ─── 右サイドバー: 統計・カウンター ─── -->
-  <div class="sidebar border-left d-flex flex-column gap-2" style="border-left: 1px solid var(--bs-border-color); border-right: none;">
+  <!-- ─── 中央: ビデオ ─── -->
+  <div id="video-wrap">
+    <img id="video-canvas" src="" alt="frame"
+         style="max-width:100%;max-height:100%;object-fit:contain">
+  </div>
 
-    <!-- FPS / 検出数 -->
+  <!-- ─── 右サイドバー ─── -->
+  <div class="sidebar d-flex flex-column gap-2"
+       style="border-left:1px solid var(--bs-border-color);border-right:none">
+
     <div>
       <div class="fw-semibold small mb-1">ライブ統計</div>
       <table class="table table-sm table-borderless mb-0 small">
@@ -141,12 +152,11 @@
 
     <hr class="my-1">
 
-    <!-- カウンター -->
     <div>
       <div class="d-flex justify-content-between align-items-center mb-1">
         <span class="fw-semibold small">カウンター</span>
         <button class="btn btn-xs btn-outline-secondary btn-sm py-0" id="btn-reset-cnt">
-          <i class="bi bi-arrow-counterclockwise"></i> リセット
+          <i class="bi bi-arrow-counterclockwise"></i>
         </button>
       </div>
       <div id="counter-list" class="small text-muted">— データなし —</div>
@@ -154,13 +164,12 @@
 
     <hr class="my-1">
 
-    <!-- 現在の検出クラス -->
     <div>
       <div class="fw-semibold small mb-1">現在の検出</div>
       <div id="detection-list" class="small text-muted">— 停止中 —</div>
     </div>
 
-  </div><!-- /right sidebar -->
+  </div>
 
 </div>
 {% endblock %}
@@ -171,105 +180,241 @@
 // 検出ページ ロジック
 // ═══════════════════════════════════════════════
 
-let _engine    = "bilt";
-let _running   = false;
-let _frameLoop = null;  // フレームポーリングタイマー
-let _statsLoop = null;  // 統計ポーリングタイマー
+let _engine      = "bilt";
+let _running     = false;
+let _modelLoaded = false;   // 現在のエンジンにモデルがロード済みか
+let _frameLoop   = null;
+let _statsLoop   = null;
 
 // ── エンジン切替 ───────────────────────────────
 document.querySelectorAll('input[name="engine"]').forEach(r => {
-  r.addEventListener("change", () => {
+  r.addEventListener("change", async () => {
+    if (_running) return; // 実行中は切替不可
     _engine = r.value;
-    // YOLO専用UI要素の表示制御
     document.getElementById("task-row").style.display =
       _engine === "yolo" ? "block" : "none";
-    loadModels();
-    loadCameras();
+    _modelLoaded = false;
+    setModelStatus(null);
+    await Promise.all([loadModels(), loadCameras()]);
+    // エンジン切替後に現在ロード済みのモデル状態を確認
+    await checkLoadedModel();
   });
 });
 
 // ── モデル一覧ロード ──────────────────────────
 async function loadModels() {
-  const res  = await fetch("/api/models/available", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({engine: _engine})
-  });
-  const data = await res.json();
-  const sel  = document.getElementById("model-select");
-  sel.innerHTML = '<option value="">— モデルを選択 —</option>';
-  (data.models || []).forEach(m => {
-    const opt = document.createElement("option");
-    opt.value = m; opt.textContent = m;
-    sel.appendChild(opt);
-  });
+  try {
+    const res  = await fetch("/api/models/available", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({engine: _engine,
+                            task_type: document.getElementById("task-select").value})
+    });
+    const data = await res.json();
+    const sel  = document.getElementById("model-select");
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— モデルを選択 —</option>';
+    (data.models || []).forEach(m => {
+      const opt = new Option(
+        m.name + (m.compatible === false ? " ⚠️" : ""),
+        m.name
+      );
+      sel.appendChild(opt);
+    });
+    // 以前の選択を復元
+    if (prev) sel.value = prev;
+  } catch(e) { console.warn("モデル一覧取得失敗:", e); }
+}
+
+// ── 現在ロードされているモデルをサービスから確認 ──
+async function checkLoadedModel() {
+  try {
+    const res  = await fetch("/api/model/info?engine=" + _engine);
+    const data = await res.json();
+    const info = data.model_info || data;
+    if (info && info.loaded && info.name) {
+      _modelLoaded = true;
+      setModelStatus(info.name, true);
+      // ドロップダウンの選択も合わせる
+      const sel = document.getElementById("model-select");
+      if (sel.querySelector(`option[value="${info.name}"]`)) {
+        sel.value = info.name;
+      }
+    } else {
+      _modelLoaded = false;
+      setModelStatus(null);
+    }
+  } catch { _modelLoaded = false; }
 }
 
 // ── モデルロード ──────────────────────────────
-document.getElementById("btn-load-model").addEventListener("click", async () => {
+document.getElementById("btn-load-model").addEventListener("click", loadSelectedModel);
+async function loadSelectedModel() {
   const model = document.getElementById("model-select").value;
   const task  = document.getElementById("task-select").value;
-  if (!model) return;
-  const res  = await fetch("/api/model/load", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({engine: _engine, model_name: model, task_type: task})
-  });
-  const data = await res.json();
-  document.getElementById("model-info").textContent =
-    data.success ? `✓ ${model} ロード済み` : "✗ ロード失敗";
-});
+  if (!model) {
+    setStartError("モデルを選択してください");
+    return false;
+  }
+  setModelStatus(model, null); // ロード中
+  const btn = document.getElementById("btn-load-model");
+  btn.disabled = true;
+  try {
+    const res  = await fetch("/api/model/load", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({engine: _engine, model_name: model, task_type: task})
+    });
+    const data = await res.json();
+    if (data.success) {
+      _modelLoaded = true;
+      setModelStatus(model, true);
+      setStartError("");
+      return true;
+    } else {
+      _modelLoaded = false;
+      setModelStatus(model, false);
+      setStartError("モデルロード失敗: " + (data.error || ""));
+      return false;
+    }
+  } catch(e) {
+    _modelLoaded = false;
+    setModelStatus(null);
+    setStartError("モデルロードエラー: " + e.message);
+    return false;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function setModelStatus(name, ok) {
+  const el  = document.getElementById("model-status");
+  const txt = document.getElementById("model-status-text");
+  if (ok === true) {
+    el.style.background = "rgba(25,135,84,0.15)";
+    el.style.color      = "var(--bs-success)";
+    txt.textContent     = "✓ " + name + " ロード済み";
+  } else if (ok === false) {
+    el.style.background = "rgba(220,53,69,0.15)";
+    el.style.color      = "var(--bs-danger)";
+    txt.textContent     = "✗ ロード失敗: " + (name || "");
+  } else if (name) {
+    el.style.background = "rgba(255,193,7,0.15)";
+    el.style.color      = "var(--bs-warning)";
+    txt.textContent     = "⟳ ロード中: " + name;
+  } else {
+    el.style.background = "rgba(108,117,125,0.15)";
+    el.style.color      = "";
+    txt.textContent     = "モデル未ロード";
+  }
+}
 
 // ── カメラ一覧ロード ──────────────────────────
 async function loadCameras() {
-  const res  = await fetch(`/api/cameras?engine=${_engine}`);
-  const data = await res.json();
-  const sel  = document.getElementById("camera-select");
-  sel.innerHTML = "";
-  (data.cameras || []).forEach(c => {
-    const opt = document.createElement("option");
-    opt.value = c.index; opt.textContent = `カメラ ${c.index} (${c.width}x${c.height})`;
-    sel.appendChild(opt);
-  });
+  setCamStatus("検索中...", "text-muted");
+  try {
+    const res  = await fetch("/api/cameras?engine=" + _engine);
+    const data = await res.json();
+    const sel  = document.getElementById("camera-select");
+    sel.innerHTML = '<option value="">— カメラ —</option>';
+    (data.cameras || []).forEach(c => {
+      sel.appendChild(new Option(
+        "Camera " + c.index + " (" + c.width + "×" + c.height + ")",
+        c.index
+      ));
+    });
+    if (data.cameras && data.cameras.length > 0) {
+      sel.value = data.cameras[0].index;
+      setCamStatus(data.cameras.length + "台検出", "text-success");
+    } else {
+      setCamStatus("カメラが見つかりません", "text-warning");
+    }
+  } catch(e) { setCamStatus("検索失敗", "text-danger"); }
+}
+
+document.getElementById("btn-scan-cam").addEventListener("click", loadCameras);
+
+function setCamStatus(msg, cls) {
+  const el = document.getElementById("cam-status");
+  el.className   = "small mt-1 " + (cls || "text-muted");
+  el.textContent = msg;
 }
 
 // ── 解像度設定 ─────────────────────────────────
 document.getElementById("btn-set-res").addEventListener("click", async () => {
   const [w, h] = document.getElementById("res-select").value.split("x").map(Number);
   await fetch("/api/camera/resolution", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
+    method: "POST", headers: {"Content-Type":"application/json"},
     body: JSON.stringify({engine: _engine, width: w, height: h})
   });
 });
 
 // ── スライダー同期 ────────────────────────────
-["conf","iou","maxdet"].forEach(name => {
-  const slider = document.getElementById(`slider-${name}`);
-  const label  = document.getElementById(`${name}-val`);
-  slider.addEventListener("input", () => { label.textContent = slider.value; });
+["conf","iou","maxdet"].forEach(id => {
+  const s = document.getElementById("slider-" + id);
+  const l = document.getElementById(id + "-val");
+  s.addEventListener("input", () => { l.textContent = s.value; });
 });
 
-// ── データセットキャプチャ切替 ────────────────
+// ── データセットキャプチャ ────────────────────
 document.getElementById("chk-dataset").addEventListener("change", function() {
   document.getElementById("project-row").style.display = this.checked ? "block" : "none";
 });
 
-// ── プロジェクト一覧ロード ────────────────────
 async function loadProjects() {
   const res  = await fetch("/api/projects");
   const data = await res.json();
   const sel  = document.getElementById("proj-select");
-  sel.innerHTML = '<option value="">— 選択 —</option>';
-  (data.projects || []).forEach(p => {
-    const opt = document.createElement("option");
-    opt.value = p; opt.textContent = p;
-    sel.appendChild(opt);
-  });
+  sel.innerHTML = '<option value="">— プロジェクト —</option>';
+  (data.projects || []).forEach(p => sel.appendChild(new Option(p, p)));
 }
 
 // ── 検出開始 ──────────────────────────────────
 document.getElementById("btn-start").addEventListener("click", async () => {
+  setStartError("");
+
+  // カメラが選択されているか確認
+  const camIdx = document.getElementById("camera-select").value;
+  if (camIdx === "" || camIdx === null) {
+    setStartError("カメラを選択してください");
+    return;
+  }
+
+  // モデル未ロードの場合は自動でロードを試みる
+  if (!_modelLoaded) {
+    const model = document.getElementById("model-select").value;
+    if (!model) {
+      setStartError("モデルを選択してロードしてください");
+      return;
+    }
+    setStartError("モデルをロード中...");
+    const ok = await loadSelectedModel();
+    if (!ok) return;
+  }
+
+  document.getElementById("btn-start").disabled = true;
+  setStartError("カメラを初期化中...");
+
+  // カメラ選択・初期化
+  const selRes = await fetch("/api/camera/select", {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, camera_index: parseInt(camIdx)})
+  });
+  const selData = await selRes.json();
+  if (!selData.success) {
+    setStartError("カメラを開けませんでした (index=" + camIdx + ")");
+    document.getElementById("btn-start").disabled = false;
+    return;
+  }
+
+  // 解像度設定
+  const [w, h] = document.getElementById("res-select").value.split("x").map(Number);
+  await fetch("/api/camera/resolution", {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({engine: _engine, width: w, height: h})
+  });
+
+  // 検出設定を送信（engine フィールドは proxy 用、サービスはそれ以外を使う）
   const settings = {
     engine:          _engine,
     conf:            parseFloat(document.getElementById("slider-conf").value),
@@ -279,40 +424,41 @@ document.getElementById("btn-start").addEventListener("click", async () => {
     save_images:     document.getElementById("chk-save").checked,
     dataset_capture: document.getElementById("chk-dataset").checked,
     project_folder:  document.getElementById("proj-select").value,
+    task:            document.getElementById("task-select").value,
     chain_mode:      false,
   };
-  const camera_idx = parseInt(document.getElementById("camera-select").value || "0");
-  // カメラ選択を先に送る
-  await fetch("/api/camera/select", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({engine: _engine, index: camera_idx})
-  });
-  // 設定を更新してから開始
   await fetch("/api/detection/settings", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
+    method: "POST", headers: {"Content-Type":"application/json"},
     body: JSON.stringify(settings)
   });
+
+  // 検出開始
   const res  = await fetch("/api/detection/start", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
+    method: "POST", headers: {"Content-Type":"application/json"},
     body: JSON.stringify({engine: _engine})
   });
   const data = await res.json();
+
   if (data.success) {
     _running = true;
+    setStartError("");
     document.getElementById("btn-start").disabled = true;
     document.getElementById("btn-stop").disabled  = false;
     startPolling();
+  } else {
+    setStartError("検出開始失敗: " + (data.error || ""));
+    document.getElementById("btn-start").disabled = false;
   }
 });
+
+function setStartError(msg) {
+  document.getElementById("start-error").textContent = msg;
+}
 
 // ── 検出停止 ──────────────────────────────────
 document.getElementById("btn-stop").addEventListener("click", async () => {
   await fetch("/api/detection/stop", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
+    method: "POST", headers: {"Content-Type":"application/json"},
     body: JSON.stringify({engine: _engine})
   });
   _running = false;
@@ -323,75 +469,67 @@ document.getElementById("btn-stop").addEventListener("click", async () => {
 
 // ── フレーム & 統計ポーリング ─────────────────
 function startPolling() {
-  // 30fps相当でフレームを更新
-  _frameLoop = setInterval(refreshFrame, 33);
+  _frameLoop = setInterval(refreshFrame, 50);   // ~20fps
   _statsLoop = setInterval(refreshStats, 500);
+  refreshFrame();
 }
-
 function stopPolling() {
-  clearInterval(_frameLoop);
-  clearInterval(_statsLoop);
+  clearInterval(_frameLoop); _frameLoop = null;
+  clearInterval(_statsLoop); _statsLoop = null;
   document.getElementById("detection-list").textContent = "— 停止中 —";
 }
 
 function refreshFrame() {
   const img = document.getElementById("video-canvas");
-  // キャッシュ回避のためタイムスタンプをパラメータに付加
-  img.src = `/api/frame/latest?engine=${_engine}&t=${Date.now()}`;
+  img.src = "/api/frame/latest?engine=" + _engine + "&t=" + Date.now();
 }
 
 async function refreshStats() {
   try {
-    const res  = await fetch(`/api/detection/stats?engine=${_engine}`);
+    const res  = await fetch("/api/detection/stats?engine=" + _engine);
     const data = await res.json();
-    document.getElementById("stat-fps").textContent   = (data.fps || 0).toFixed(1);
-    document.getElementById("stat-det").textContent   = data.detections_per_frame || 0;
-    document.getElementById("stat-total").textContent = data.total_detections || 0;
+    const s    = data.stats || data;
+    document.getElementById("stat-fps").textContent   = (s.fps   || 0).toFixed(1);
+    document.getElementById("stat-det").textContent   = s.detections_per_frame ?? "—";
+    document.getElementById("stat-total").textContent = s.total_detections      ?? "—";
 
-    // 検出中クラス表示
     const dlist = document.getElementById("detection-list");
-    if (data.current_classes && data.current_classes.length > 0) {
-      dlist.innerHTML = data.current_classes
+    if (s.current_classes && s.current_classes.length > 0) {
+      dlist.innerHTML = s.current_classes
         .map(c => `<span class="badge bg-secondary me-1 mb-1">${c}</span>`)
         .join("");
     } else {
       dlist.textContent = "— 検出なし —";
     }
-
-    // カウンター表示
     await refreshCounters();
   } catch { /* ポーリングエラーは無視 */ }
 }
 
 async function refreshCounters() {
-  const res  = await fetch(`/api/counters?engine=${_engine}`);
+  const res  = await fetch("/api/counters?engine=" + _engine);
   const data = await res.json();
   const el   = document.getElementById("counter-list");
-  const counters = data.counters || {};
-  if (Object.keys(counters).length === 0) {
-    el.textContent = "— データなし —"; return;
-  }
-  el.innerHTML = Object.entries(counters)
-    .map(([cls, cnt]) => `<div class="d-flex justify-content-between">
-      <span class="text-muted">${cls}</span>
-      <span class="badge bg-primary">${cnt}</span>
-    </div>`)
-    .join("");
+  const cnt  = data.counters || {};
+  if (!Object.keys(cnt).length) { el.textContent = "— データなし —"; return; }
+  el.innerHTML = Object.entries(cnt).map(([k,v]) =>
+    `<div class="d-flex justify-content-between">
+       <span class="text-muted">${k}</span>
+       <span class="badge bg-primary">${v}</span>
+     </div>`
+  ).join("");
 }
-
-// カウンターリセット
 document.getElementById("btn-reset-cnt").addEventListener("click", async () => {
   await fetch("/api/counters/reset", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
+    method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({engine: _engine})
   });
   await refreshCounters();
 });
 
 // ── 初期化 ────────────────────────────────────
-loadModels();
-loadCameras();
-loadProjects();
+(async () => {
+  await Promise.all([loadModels(), loadCameras(), loadProjects()]);
+  await checkLoadedModel();
+})();
 </script>
 {% endblock %}

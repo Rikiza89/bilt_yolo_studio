@@ -1,6 +1,61 @@
 {% extends "base.html" %}
 {% block title %}アノテーション — BILT+YOLO Studio{% endblock %}
 
+{% block head_extra %}
+<style>
+  /* ─── アノテーションキャンバス (base.html の定義を上書き) ─── */
+  #annotation-wrap {
+    position: relative; flex: 1; overflow: hidden;
+    background: #111; display: flex;
+    align-items: center; justify-content: center;
+  }
+  /* 単一キャンバスで描画・操作の両方を担う */
+  #anno-canvas {
+    display: block;
+    cursor: crosshair;
+    /* マウスイベントを確実に受け取るために pointer-events を明示 */
+    pointer-events: all;
+    /* キャンバスが伸縮しないよう max-size を画像サイズに任せる */
+    max-width: 100%; max-height: 100%;
+  }
+  /* カメラモーダル */
+  #cam-modal-backdrop {
+    display: none; position: fixed; inset: 0; z-index: 1050;
+    background: rgba(0,0,0,0.75);
+    align-items: center; justify-content: center;
+  }
+  #cam-modal-backdrop.show { display: flex; }
+  #cam-modal {
+    background: var(--bs-body-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 8px; padding: 1rem;
+    max-width: 820px; width: 95vw;
+    display: flex; flex-direction: column; gap: 0.75rem;
+  }
+  #cam-preview-img {
+    width: 100%; border-radius: 4px; background: #000;
+    display: block; max-height: 55vh; object-fit: contain;
+  }
+  #burst-progress-wrap { display: none; }
+  #captured-strip {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    max-height: 90px; overflow-y: auto;
+  }
+  #captured-strip img {
+    height: 72px; width: 72px; object-fit: cover;
+    border-radius: 4px; border: 2px solid transparent; cursor: pointer;
+  }
+  #captured-strip img:hover { border-color: #0d6efd; }
+  .section-header {
+    cursor: pointer; user-select: none;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.3rem 0;
+  }
+  .section-header:hover { color: var(--bs-primary); }
+  .chevron { transition: transform 0.15s; }
+</style>
+{% endblock %}
+
 {% block body %}
 <div class="d-flex h-100">
 
@@ -25,42 +80,90 @@
       </div>
     </div>
 
-    <!-- 画像アップロード -->
+    <hr class="my-1">
+
+    <!-- カメラキャプチャ -->
     <div>
-      <label class="form-label fw-semibold small mb-1">画像をアップロード</label>
-      <input type="file" class="form-control form-control-sm" id="file-upload"
-             multiple accept="image/*">
-      <button class="btn btn-sm btn-outline-secondary w-100 mt-1" id="btn-upload">
-        <i class="bi bi-cloud-upload"></i> アップロード
-      </button>
+      <div class="section-header" id="cam-toggle">
+        <span class="fw-semibold small">
+          <i class="bi bi-camera-fill text-primary"></i> カメラキャプチャ
+        </span>
+        <i class="bi bi-chevron-down small chevron" id="cam-chevron"></i>
+      </div>
+      <div id="cam-body" class="d-flex flex-column gap-1 mt-1">
+        <div class="d-flex gap-1">
+          <select class="form-select form-select-sm" id="cam-engine" style="flex:1">
+            <option value="bilt">BILT</option>
+            <option value="yolo">YOLO</option>
+          </select>
+          <select class="form-select form-select-sm" id="cam-idx" style="flex:2">
+            <option value="">— カメラ —</option>
+          </select>
+        </div>
+        <button class="btn btn-sm btn-outline-secondary w-100" id="btn-cam-scan">
+          <i class="bi bi-arrow-repeat"></i> カメラ検索
+        </button>
+        <select class="form-select form-select-sm" id="cam-res">
+          <option value="1280x960">1280 × 960</option>
+          <option value="1920x1080">1920 × 1080</option>
+          <option value="640x480">640 × 480</option>
+        </select>
+        <button class="btn btn-sm btn-primary w-100" id="btn-cam-connect">
+          <i class="bi bi-plug-fill"></i> 接続してプレビュー
+        </button>
+        <div id="cam-status" class="small text-muted text-center"></div>
+      </div>
     </div>
+
+    <hr class="my-1">
+
+    <!-- ファイルアップロード -->
+    <div>
+      <div class="section-header" id="upload-toggle">
+        <span class="fw-semibold small">
+          <i class="bi bi-cloud-upload text-secondary"></i> ファイルアップロード
+        </span>
+        <i class="bi bi-chevron-down small chevron" id="upload-chevron"></i>
+      </div>
+      <div id="upload-body" class="d-flex flex-column gap-1 mt-1" style="display:none!important">
+        <input type="file" class="form-control form-control-sm" id="file-upload"
+               multiple accept="image/*">
+        <button class="btn btn-sm btn-outline-secondary w-100" id="btn-upload">
+          <i class="bi bi-cloud-upload"></i> アップロード
+        </button>
+      </div>
+    </div>
+
+    <hr class="my-1">
 
     <!-- 画像リスト -->
     <div style="flex:1;overflow:hidden;display:flex;flex-direction:column">
-      <label class="form-label fw-semibold small mb-1">画像一覧</label>
+      <label class="form-label fw-semibold small mb-1">
+        画像一覧 <span id="img-count" class="text-muted fw-normal"></span>
+      </label>
       <div id="image-list"
-           style="flex:1;overflow-y:auto;border:1px solid var(--bs-border-color);border-radius:4px;font-size:0.78rem">
+           style="flex:1;overflow-y:auto;border:1px solid var(--bs-border-color);
+                  border-radius:4px;font-size:0.78rem">
         <div class="text-muted p-2">プロジェクトを選択してください</div>
       </div>
     </div>
 
   </div><!-- /left sidebar -->
 
-  <!-- ─── 中央: アノテーションキャンバス ─── -->
+  <!-- ─── 中央: 単一キャンバス ─── -->
   <div id="annotation-wrap">
-    <canvas id="annotation-canvas"></canvas>
-    <canvas id="anno-overlay"></canvas>
-
-    <!-- キャンバスが空の時のメッセージ -->
-    <div id="canvas-hint" style="position:absolute;color:#555;font-size:1.2rem;pointer-events:none">
-      画像を選択してください
+    <canvas id="anno-canvas"></canvas>
+    <div id="canvas-hint"
+         style="position:absolute;color:#888;font-size:1.1rem;pointer-events:none;text-align:center">
+      プロジェクトを選択し、<br>画像をアップロードまたはカメラで撮影してください
     </div>
   </div>
 
   <!-- ─── 右サイドバー ─── -->
-  <div class="sidebar d-flex flex-column gap-2" style="border-left:1px solid var(--bs-border-color);border-right:none">
+  <div class="sidebar d-flex flex-column gap-2"
+       style="border-left:1px solid var(--bs-border-color);border-right:none">
 
-    <!-- アノテーションツール -->
+    <!-- 描画ツール -->
     <div>
       <label class="form-label fw-semibold small mb-1">描画ツール</label>
       <div class="btn-group-vertical w-100" role="group">
@@ -75,10 +178,10 @@
       </div>
     </div>
 
-    <!-- クラス管理 -->
+    <!-- クラス -->
     <div>
       <label class="form-label fw-semibold small mb-1">クラス</label>
-      <div id="class-list" style="max-height:180px;overflow-y:auto"></div>
+      <div id="class-list" style="max-height:160px;overflow-y:auto"></div>
       <div class="d-flex gap-1 mt-1">
         <input type="text" class="form-control form-control-sm" id="new-class-name"
                placeholder="クラス名">
@@ -99,17 +202,18 @@
         <i class="bi bi-trash"></i> 全削除
       </button>
       <button class="btn btn-sm btn-success" id="btn-save-label">
-        <i class="bi bi-floppy"></i> ラベルを保存
+        <i class="bi bi-floppy"></i> ラベルを保存 (Ctrl+S)
       </button>
     </div>
 
     <hr class="my-1">
 
-    <!-- 現在のアノテーション一覧 -->
+    <!-- アノテーション一覧 -->
     <div style="flex:1;overflow:hidden;display:flex;flex-direction:column">
       <label class="form-label fw-semibold small mb-1">アノテーション一覧</label>
       <div id="anno-list"
-           style="flex:1;overflow-y:auto;font-size:0.78rem;border:1px solid var(--bs-border-color);border-radius:4px"></div>
+           style="flex:1;overflow-y:auto;font-size:0.78rem;
+                  border:1px solid var(--bs-border-color);border-radius:4px"></div>
     </div>
 
     <!-- ナビゲーション -->
@@ -123,71 +227,301 @@
       </button>
     </div>
 
-  </div><!-- /right sidebar -->
+  </div>
 
 </div>
+
+<!-- カメラモーダル -->
+<div id="cam-modal-backdrop">
+  <div id="cam-modal">
+    <div class="d-flex justify-content-between align-items-center">
+      <h6 class="mb-0"><i class="bi bi-camera-fill text-primary"></i> カメラキャプチャ</h6>
+      <div class="d-flex gap-2 align-items-center">
+        <span class="small text-muted" id="cam-cap-count">0枚キャプチャ済み</span>
+        <button class="btn btn-sm btn-outline-secondary" id="btn-cam-close">
+          <i class="bi bi-x-lg"></i>
+        </button>
+      </div>
+    </div>
+    <img id="cam-preview-img" src="" alt="プレビュー">
+    <div class="d-flex gap-2 flex-wrap align-items-center">
+      <button class="btn btn-primary" id="btn-snapshot">
+        <i class="bi bi-camera"></i> キャプチャ (Space)
+      </button>
+      <div class="d-flex align-items-center gap-1">
+        <span class="small text-muted">バースト:</span>
+        <input type="number" class="form-control form-control-sm" id="burst-n"
+               value="10" min="2" max="500" style="width:62px">
+        <span class="small text-muted">枚</span>
+        <input type="number" class="form-control form-control-sm" id="burst-ms"
+               value="500" min="100" max="5000" step="100" style="width:72px">
+        <span class="small text-muted">ms</span>
+        <button class="btn btn-outline-info btn-sm" id="btn-burst-start">
+          <i class="bi bi-play-circle"></i>
+        </button>
+        <button class="btn btn-outline-danger btn-sm" id="btn-burst-stop" disabled>
+          <i class="bi bi-stop-circle"></i>
+        </button>
+      </div>
+    </div>
+    <div id="burst-progress-wrap">
+      <div class="progress" style="height:6px">
+        <div class="progress-bar progress-bar-striped progress-bar-animated bg-info"
+             id="burst-bar" style="width:0%"></div>
+      </div>
+      <div class="small text-muted text-center mt-1" id="burst-lbl"></div>
+    </div>
+    <div>
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <label class="small fw-semibold mb-0">キャプチャ済み（クリックで選択）</label>
+        <button class="btn btn-sm btn-outline-danger py-0 px-2"
+                style="font-size:0.75rem" id="btn-clear-cap">クリア</button>
+      </div>
+      <div id="captured-strip"></div>
+    </div>
+  </div>
+</div>
 {% endblock %}
+
 
 {% block scripts %}
 <script>
 // ═══════════════════════════════════════════════
-// アノテーションページ ロジック
-// Canvas 2D API によるバウンディングボックス & ポリゴン描画
+// アノテーションページ — 単一キャンバス実装
+//
+// 設計方針:
+//   - 単一 <canvas> で画像・アノテーション・描画中プレビューを全て描画
+//   - state.img に現在の Image オブジェクトを保持し、redraw() で毎回再描画
+//   - マウスイベントはキャンバス本体に直接登録
+//   - overlay キャンバスは廃止（位置ズレ・pointer-events 問題を回避）
 // ═══════════════════════════════════════════════
 
-// ── 状態管理 ─────────────────────────────────
+// ── 状態 ──────────────────────────────────────
 const state = {
-  project:      null,
-  images:       [],
-  currentIdx:   -1,
-  classes:      [],
-  selectedClass: 0,
-  annotations:  [],   // {class_id, class_name, type:"bbox"|"polygon", data:[...]}
-  tool:         "bbox",
-  drawing:      false,
-  startX: 0, startY: 0,
-  polyPoints:   [],   // ポリゴン描画中の点列
-  imgNatW: 1, imgNatH: 1,
-  canvasW: 1, canvasH: 1,
+  project: null, images: [], currentIdx: -1,
+  classes: [], selectedClass: 0,
+  annotations: [],   // { class_id, class_name, type, data }
+  tool: "bbox",
+  drawing: false, startX: 0, startY: 0,
+  polyPoints: [],
+  canvasW: 0, canvasH: 0,
+  img: null,         // 現在表示中の Image オブジェクト（redraw で再利用）
 };
 
-const canvas  = document.getElementById("annotation-canvas");
-const overlay = document.getElementById("anno-overlay");
-const ctx     = canvas.getContext("2d");
-const octx    = overlay.getContext("2d");
+const cam = {
+  engine: "bilt", camIndex: 0,
+  previewTimer: null, burstTimer: null,
+  burstTotal: 0, burstDone: 0, capturedCount: 0,
+};
 
-// ── ツール切替 ─────────────────────────────────
+const COLORS = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6",
+                "#1abc9c","#e67e22","#34495e","#e91e63","#00bcd4"];
+
+const canvas = document.getElementById("anno-canvas");
+const ctx    = canvas.getContext("2d");
+
+// ══════════════════════════════════════════════
+// アコーディオン
+// ══════════════════════════════════════════════
+function accordion(tid, bid, cid, open) {
+  const body = document.getElementById(bid);
+  const chev = document.getElementById(cid);
+  body.style.display    = open ? "" : "none";
+  chev.style.transform  = open ? "" : "rotate(-90deg)";
+  document.getElementById(tid).addEventListener("click", () => {
+    open = !open;
+    body.style.display   = open ? "" : "none";
+    chev.style.transform = open ? "" : "rotate(-90deg)";
+  });
+}
+accordion("cam-toggle",    "cam-body",    "cam-chevron",    true);
+accordion("upload-toggle", "upload-body", "upload-chevron", false);
+
+// ══════════════════════════════════════════════
+// キャンバス描画
+// ══════════════════════════════════════════════
+
+function redraw(liveX, liveY) {
+  if (!state.img) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 1. 背景画像を毎回描画（resizeCanvas後にも正確に描画される）
+  ctx.drawImage(state.img, 0, 0, canvas.width, canvas.height);
+
+  // 2. 確定済みアノテーションを描画
+  state.annotations.forEach(a => {
+    const c = COLORS[a.class_id % COLORS.length];
+    ctx.strokeStyle = c;
+    ctx.fillStyle   = c + "50";
+    ctx.lineWidth   = 2;
+    if (a.type === "bbox") {
+      const [ncx,ncy,nbw,nbh] = a.data.map(Number);
+      const px = (ncx - nbw/2) * state.canvasW;
+      const py = (ncy - nbh/2) * state.canvasH;
+      const pw = nbw * state.canvasW;
+      const ph = nbh * state.canvasH;
+      ctx.strokeRect(px, py, pw, ph);
+      ctx.fillRect(px, py, pw, ph);
+      ctx.fillStyle = c;
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillText(a.class_name, px + 3, Math.max(py - 4, 12));
+    } else {
+      const pts = [];
+      for (let i = 0; i < a.data.length; i += 2)
+        pts.push([+a.data[i] * state.canvasW, +a.data[i+1] * state.canvasH]);
+      if (pts.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      pts.slice(1).forEach(([x,y]) => ctx.lineTo(x,y));
+      ctx.closePath();
+      ctx.stroke(); ctx.fill();
+      ctx.fillStyle = c;
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillText(a.class_name, pts[0][0] + 3, Math.max(pts[0][1] - 4, 12));
+    }
+  });
+
+  // 3. 描画中プレビュー（ライブプレビュー）
+  if (liveX === undefined) return;
+  const c = COLORS[state.selectedClass % COLORS.length];
+  ctx.strokeStyle = c;
+  ctx.fillStyle   = c + "30";
+  ctx.lineWidth   = 2;
+  ctx.setLineDash([5, 3]);
+
+  if (state.tool === "bbox" && state.drawing) {
+    const x1 = Math.min(state.startX, liveX);
+    const y1 = Math.min(state.startY, liveY);
+    const w  = Math.abs(liveX - state.startX);
+    const h  = Math.abs(liveY - state.startY);
+    ctx.strokeRect(x1, y1, w, h);
+    ctx.fillRect(x1, y1, w, h);
+  } else if (state.tool === "polygon" && state.polyPoints.length > 0) {
+    const pts = state.polyPoints.map(([nx,ny]) => [nx*state.canvasW, ny*state.canvasH]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    pts.slice(1).forEach(([x,y]) => ctx.lineTo(x,y));
+    ctx.lineTo(liveX, liveY);
+    ctx.stroke();
+    ctx.fillStyle = c;
+    pts.forEach(([x,y]) => {
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, 2*Math.PI); ctx.fill();
+    });
+  }
+  ctx.setLineDash([]);
+}
+
+function resizeCanvas(img) {
+  const wrap  = document.getElementById("annotation-wrap");
+  const maxW  = wrap.clientWidth  - 4;
+  const maxH  = wrap.clientHeight - 4;
+  const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
+  canvas.width  = state.canvasW = Math.round(img.naturalWidth  * scale);
+  canvas.height = state.canvasH = Math.round(img.naturalHeight * scale);
+}
+
+// ── マウスイベント（キャンバス本体に直接登録）─────
+function canvasXY(e) {
+  const r = canvas.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+canvas.addEventListener("mousedown", e => {
+  if (!state.img) return;
+  e.preventDefault();
+  const [mx, my] = canvasXY(e);
+  if (state.tool === "bbox") {
+    state.drawing = true;
+    state.startX  = mx; state.startY = my;
+  } else if (state.tool === "polygon") {
+    if (e.button === 2) {
+      finishPolygon();
+    } else {
+      state.polyPoints.push([mx / state.canvasW, my / state.canvasH]);
+      redraw(mx, my);
+    }
+  }
+});
+
+canvas.addEventListener("mousemove", e => {
+  if (!state.img) return;
+  const [mx, my] = canvasXY(e);
+  if (state.drawing || (state.tool === "polygon" && state.polyPoints.length > 0)) {
+    redraw(mx, my);
+  }
+});
+
+canvas.addEventListener("mouseup", e => {
+  if (!state.img || state.tool !== "bbox" || !state.drawing) return;
+  const [mx, my] = canvasXY(e);
+  state.drawing = false;
+  const x1 = Math.min(state.startX, mx), y1 = Math.min(state.startY, my);
+  const x2 = Math.max(state.startX, mx), y2 = Math.max(state.startY, my);
+  if (x2 - x1 < 4 || y2 - y1 < 4) { redraw(); return; }
+  state.annotations.push({
+    class_id:   state.selectedClass,
+    class_name: state.classes[state.selectedClass] || "class_" + state.selectedClass,
+    type: "bbox",
+    data: [
+      ((x1+x2)/2/state.canvasW).toFixed(6),
+      ((y1+y2)/2/state.canvasH).toFixed(6),
+      ((x2-x1)/state.canvasW).toFixed(6),
+      ((y2-y1)/state.canvasH).toFixed(6),
+    ],
+  });
+  redraw(); updateAnnoList();
+});
+
+canvas.addEventListener("mouseleave", () => { if (state.img) redraw(); });
+canvas.addEventListener("contextmenu", e => { e.preventDefault(); finishPolygon(); });
+
+function finishPolygon() {
+  if (state.polyPoints.length < 3) { state.polyPoints = []; redraw(); return; }
+  state.annotations.push({
+    class_id:   state.selectedClass,
+    class_name: state.classes[state.selectedClass] || "class_" + state.selectedClass,
+    type: "polygon",
+    data: state.polyPoints.flatMap(([x,y]) => [x.toFixed(6), y.toFixed(6)]),
+  });
+  state.polyPoints = [];
+  redraw(); updateAnnoList();
+}
+
+// ツール切替
 document.querySelectorAll('input[name="anno-tool"]').forEach(r => {
   r.addEventListener("change", () => {
     state.tool = r.value;
-    state.polyPoints = [];
-    state.drawing = false;
+    state.polyPoints = []; state.drawing = false;
     redraw();
   });
 });
 
-// ── プロジェクト選択 ──────────────────────────
+// ══════════════════════════════════════════════
+// プロジェクト & 画像管理
+// ══════════════════════════════════════════════
+
 document.getElementById("proj-select").addEventListener("change", async function() {
   state.project = this.value || null;
+  state.images = []; state.currentIdx = -1; state.annotations = [];
+  state.img = null;
+  canvas.width = canvas.height = 0;
+  document.getElementById("canvas-hint").style.display = "";
   if (!state.project) return;
   await loadClasses();
   await loadImages();
 });
 
-// ── 新規プロジェクト作成 ──────────────────────
 document.getElementById("btn-new-proj").addEventListener("click", async () => {
   const name = document.getElementById("new-proj-name").value.trim();
   if (!name) return;
-  const res  = await fetch("/api/projects/create", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
+  const res = await fetch("/api/projects/create", {
+    method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({name})
   });
   const data = await res.json();
   if (data.success) {
     const sel = document.getElementById("proj-select");
-    const opt = document.createElement("option");
-    opt.value = name; opt.textContent = name; opt.selected = true;
+    const opt = new Option(name, name, true, true);
     sel.appendChild(opt);
     state.project = name;
     document.getElementById("new-proj-name").value = "";
@@ -196,360 +530,179 @@ document.getElementById("btn-new-proj").addEventListener("click", async () => {
   }
 });
 
-// ── 画像アップロード ──────────────────────────
 document.getElementById("btn-upload").addEventListener("click", async () => {
   if (!state.project) { alert("プロジェクトを選択してください"); return; }
   const files = document.getElementById("file-upload").files;
-  if (files.length === 0) return;
+  if (!files.length) return;
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
-  await fetch(`/api/projects/${state.project}/upload`, {method:"POST", body:fd});
-  await loadImages();
+  await fetch("/api/projects/" + state.project + "/upload", {method:"POST", body:fd});
+  await refreshImageList();
+  if (state.currentIdx < 0 && state.images.length) selectImage(0);
 });
 
-// ── 画像一覧ロード ────────────────────────────
 async function loadImages() {
-  const res  = await fetch(`/api/projects/${state.project}/images`);
+  await refreshImageList();
+  if (state.images.length > 0 && state.currentIdx < 0) selectImage(0);
+}
+
+async function refreshImageList() {
+  if (!state.project) return;
+  const res  = await fetch("/api/projects/" + state.project + "/images");
   const data = await res.json();
+  const prev = state.images[state.currentIdx];
   state.images = data.images || [];
-  state.currentIdx = state.images.length > 0 ? 0 : -1;
+
+  const countEl = document.getElementById("img-count");
+  countEl.textContent = state.images.length ? " (" + state.images.length + "枚)" : "";
 
   const listEl = document.getElementById("image-list");
+  if (!state.images.length) {
+    listEl.innerHTML = '<div class="text-muted p-2 small">画像がありません</div>';
+    return;
+  }
   listEl.innerHTML = "";
   state.images.forEach((name, i) => {
     const div = document.createElement("div");
-    div.className = "px-2 py-1 d-flex align-items-center gap-1";
+    div.className    = "px-2 py-1 d-flex align-items-center gap-1";
     div.style.cursor = "pointer";
-    div.innerHTML = `<i class="bi bi-image"></i> ${name}`;
+    div.innerHTML    = '<i class="bi bi-image text-muted"></i> <span class="text-truncate">' + name + '</span>';
     div.addEventListener("click", () => selectImage(i));
     listEl.appendChild(div);
   });
 
-  if (state.currentIdx >= 0) selectImage(0);
+  // 以前選択していたファイルのインデックスを復元
+  if (prev) {
+    const ni = state.images.indexOf(prev);
+    if (ni >= 0) state.currentIdx = ni;
+  }
+  highlightList(state.currentIdx);
 }
 
-// ── 画像を選択 ─────────────────────────────────
-async function selectImage(idx) {
-  if (idx < 0 || idx >= state.images.length) return;
-  state.currentIdx = idx;
-  const name = state.images[idx];
-  document.getElementById("img-index").textContent =
-    `${idx+1}/${state.images.length}`;
-
-  // 既存ラベルをロード
-  await loadLabel(name);
-
-  // 画像をキャンバスに描画
-  const img = new Image();
-  img.onload = () => {
-    state.imgNatW = img.naturalWidth;
-    state.imgNatH = img.naturalHeight;
-    resizeCanvas(img.naturalWidth, img.naturalHeight);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    document.getElementById("canvas-hint").style.display = "none";
-    redraw();
-  };
-  img.src = `/api/projects/${state.project}/image/${name}`;
-
-  // リスト内の選択状態を更新
+function highlightList(idx) {
   document.querySelectorAll("#image-list > div").forEach((el, i) => {
     el.style.background = i === idx ? "rgba(13,110,253,0.2)" : "";
   });
 }
 
-// ── ラベルのロード ────────────────────────────
+async function selectImage(idx) {
+  if (idx < 0 || idx >= state.images.length) return;
+  state.currentIdx  = idx;
+  state.annotations = [];
+  state.drawing     = false;
+  state.polyPoints  = [];
+  const name = state.images[idx];
+
+  document.getElementById("img-index").textContent = (idx+1) + "/" + state.images.length;
+  highlightList(idx);
+
+  // ラベルをロード
+  await loadLabel(name);
+
+  // 画像を非同期でロードし、ロード完了後にキャンバスをリサイズして描画
+  const img = new Image();
+  img.onload = () => {
+    state.img = img;
+    resizeCanvas(img);
+    document.getElementById("canvas-hint").style.display = "none";
+    redraw();
+  };
+  img.onerror = () => {
+    console.error("画像ロード失敗:", name);
+  };
+  // キャッシュ回避のためタイムスタンプを付加
+  img.src = "/api/projects/" + state.project + "/image/" + encodeURIComponent(name) + "?t=" + Date.now();
+}
+
 async function loadLabel(imageName) {
   state.annotations = [];
-  const res  = await fetch(`/api/projects/${state.project}/label/${imageName}`);
-  if (!res.ok) return;
-  const text = await res.text();
-  if (!text.trim()) return;
-
-  // YOLOフォーマット: class_id cx cy w h (正規化座標)
-  text.trim().split("\n").forEach(line => {
-    const parts = line.trim().split(" ").map(Number);
-    if (parts.length < 5) return;
-    const [cls_id, cx, cy, bw, bh] = parts;
-    state.annotations.push({
-      class_id:   cls_id,
-      class_name: state.classes[cls_id] || `class_${cls_id}`,
-      type:       "bbox",
-      data:       [cx, cy, bw, bh],   // 正規化座標のまま保持
+  try {
+    const res = await fetch("/api/projects/" + state.project + "/label/" + encodeURIComponent(imageName));
+    if (!res.ok) return;
+    const text = await res.text();
+    if (!text.trim()) return;
+    text.trim().split("\n").forEach(line => {
+      const p = line.trim().split(/\s+/).map(Number);
+      if (p.length < 5 || p.some(isNaN)) return;
+      state.annotations.push({
+        class_id: p[0],
+        class_name: state.classes[p[0]] || "class_" + p[0],
+        type: "bbox",
+        data: [p[1], p[2], p[3], p[4]],
+      });
     });
-  });
+  } catch(e) { console.warn("ラベルロード失敗:", e); }
   updateAnnoList();
 }
 
-// ── ラベルの保存 ──────────────────────────────
 document.getElementById("btn-save-label").addEventListener("click", async () => {
   if (!state.project || state.currentIdx < 0) return;
-  const imageName = state.images[state.currentIdx];
-
-  // YOLOフォーマットに変換
-  const lines = state.annotations.map(a => {
-    if (a.type === "bbox") {
-      return `${a.class_id} ${a.data.join(" ")}`;
-    } else {
-      // ポリゴン: class_id x1 y1 x2 y2 ...
-      return `${a.class_id} ${a.data.join(" ")}`;
-    }
+  const name  = state.images[state.currentIdx];
+  const lines = state.annotations.map(a => a.class_id + " " + a.data.join(" "));
+  await fetch("/api/projects/" + state.project + "/label/" + encodeURIComponent(name), {
+    method: "POST", body: lines.join("\n"),
   });
-
-  await fetch(`/api/projects/${state.project}/label/${imageName}`, {
-    method: "POST",
-    body: lines.join("\n"),
-  });
-
-  // 保存フィードバック
   const btn = document.getElementById("btn-save-label");
-  btn.textContent = "✓ 保存完了";
-  setTimeout(() => { btn.innerHTML = '<i class="bi bi-floppy"></i> ラベルを保存'; }, 1500);
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<i class="bi bi-check-lg"></i> 保存完了';
+  btn.classList.replace("btn-success","btn-outline-success");
+  setTimeout(() => { btn.innerHTML = orig; btn.classList.replace("btn-outline-success","btn-success"); }, 1500);
 });
 
-// ── キャンバスリサイズ ─────────────────────────
-function resizeCanvas(natW, natH) {
-  const wrap = document.getElementById("annotation-wrap");
-  const maxW = wrap.clientWidth  - 10;
-  const maxH = wrap.clientHeight - 10;
-  const scale = Math.min(maxW / natW, maxH / natH);
-  canvas.width  = overlay.width  = state.canvasW = Math.round(natW * scale);
-  canvas.height = overlay.height = state.canvasH = Math.round(natH * scale);
-}
-
-// ── 座標変換: キャンバス座標 → 正規化座標 ───────
-function toNorm(cx, cy) {
-  return [cx / state.canvasW, cy / state.canvasH];
-}
-
-// ── 座標変換: 正規化座標 → キャンバス座標 ───────
-function fromNorm(nx, ny) {
-  return [nx * state.canvasW, ny * state.canvasH];
-}
-
-// ── マウスイベント ────────────────────────────
-function canvasXY(e) {
-  const r = canvas.getBoundingClientRect();
-  return [e.clientX - r.left, e.clientY - r.top];
-}
-
-overlay.addEventListener("mousedown", e => {
-  const [mx, my] = canvasXY(e);
-  if (state.tool === "bbox") {
-    state.drawing = true;
-    state.startX = mx; state.startY = my;
-  } else if (state.tool === "polygon") {
-    if (e.button === 2) {
-      // 右クリックでポリゴン確定
-      finishPolygon();
-    } else {
-      state.polyPoints.push(toNorm(mx, my));
-      drawOverlay();
-    }
-  }
-});
-
-overlay.addEventListener("mousemove", e => {
-  if (!state.drawing && state.tool !== "polygon") return;
-  const [mx, my] = canvasXY(e);
-  drawOverlay(mx, my);
-});
-
-overlay.addEventListener("mouseup", e => {
-  if (state.tool !== "bbox" || !state.drawing) return;
-  const [mx, my] = canvasXY(e);
-  state.drawing = false;
-
-  // バウンディングボックスをアノテーションに追加 (正規化座標)
-  const x1 = Math.min(state.startX, mx);
-  const y1 = Math.min(state.startY, my);
-  const x2 = Math.max(state.startX, mx);
-  const y2 = Math.max(state.startY, my);
-  if (x2 - x1 < 3 || y2 - y1 < 3) return;  // 誤クリック防止
-
-  const cx = (x1 + x2) / 2 / state.canvasW;
-  const cy = (y1 + y2) / 2 / state.canvasH;
-  const bw = (x2 - x1) / state.canvasW;
-  const bh = (y2 - y1) / state.canvasH;
-
-  state.annotations.push({
-    class_id:   state.selectedClass,
-    class_name: state.classes[state.selectedClass] || `class_${state.selectedClass}`,
-    type:       "bbox",
-    data:       [cx.toFixed(6), cy.toFixed(6), bw.toFixed(6), bh.toFixed(6)],
-  });
-  redraw();
-  updateAnnoList();
-});
-
-overlay.addEventListener("contextmenu", e => { e.preventDefault(); });
-
-function finishPolygon() {
-  if (state.polyPoints.length < 3) { state.polyPoints = []; redraw(); return; }
-  // ポリゴン座標を平坦化して保存
-  const flat = state.polyPoints.flatMap(([x,y]) => [x.toFixed(6), y.toFixed(6)]);
-  state.annotations.push({
-    class_id:   state.selectedClass,
-    class_name: state.classes[state.selectedClass] || `class_${state.selectedClass}`,
-    type:       "polygon",
-    data:       flat,
-  });
-  state.polyPoints = [];
-  redraw();
-  updateAnnoList();
-}
-
-// ── 描画関数 ──────────────────────────────────
-const COLORS = [
-  "#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6",
-  "#1abc9c","#e67e22","#34495e","#e91e63","#00bcd4",
-];
-
-function redraw() {
-  // 下レイヤー: 確定済みアノテーション
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  // 画像の再描画は img.onload 内で処理済みのため、
-  // ここでは確定アノテーションのみ描画する
-  state.annotations.forEach((a, i) => {
-    const color = COLORS[a.class_id % COLORS.length];
-    ctx.strokeStyle = color;
-    ctx.fillStyle   = color + "40";
-    ctx.lineWidth   = 2;
-
-    if (a.type === "bbox") {
-      const [cx, cy, bw, bh] = a.data.map(Number);
-      const [px, py] = fromNorm(cx - bw/2, cy - bh/2);
-      const [pw, ph] = [bw * state.canvasW, bh * state.canvasH];
-      ctx.strokeRect(px, py, pw, ph);
-      ctx.fillRect(px, py, pw, ph);
-      ctx.fillStyle = color;
-      ctx.font = "11px sans-serif";
-      ctx.fillText(a.class_name, px + 2, py - 3);
-    } else if (a.type === "polygon") {
-      const pts = [];
-      for (let i = 0; i < a.data.length; i += 2) {
-        pts.push(fromNorm(Number(a.data[i]), Number(a.data[i+1])));
-      }
-      ctx.beginPath();
-      ctx.moveTo(pts[0][0], pts[0][1]);
-      pts.slice(1).forEach(([x,y]) => ctx.lineTo(x, y));
-      ctx.closePath();
-      ctx.stroke(); ctx.fill();
-      ctx.fillStyle = color;
-      ctx.font = "11px sans-serif";
-      ctx.fillText(a.class_name, pts[0][0] + 2, pts[0][1] - 3);
-    }
-  });
-
-  // 上レイヤーをクリア
-  octx.clearRect(0, 0, overlay.width, overlay.height);
-}
-
-function drawOverlay(mouseX, mouseY) {
-  octx.clearRect(0, 0, overlay.width, overlay.height);
-  const color = COLORS[state.selectedClass % COLORS.length];
-
-  if (state.tool === "bbox" && state.drawing && mouseX !== undefined) {
-    const x1 = Math.min(state.startX, mouseX);
-    const y1 = Math.min(state.startY, mouseY);
-    const w  = Math.abs(mouseX - state.startX);
-    const h  = Math.abs(mouseY - state.startY);
-    octx.strokeStyle = color;
-    octx.fillStyle   = color + "30";
-    octx.lineWidth = 2;
-    octx.strokeRect(x1, y1, w, h);
-    octx.fillRect(x1, y1, w, h);
-  } else if (state.tool === "polygon") {
-    // ポリゴン描画中の点とライン
-    if (state.polyPoints.length === 0) return;
-    const pts = state.polyPoints.map(([nx,ny]) => fromNorm(nx, ny));
-    octx.strokeStyle = color;
-    octx.lineWidth = 2;
-    octx.beginPath();
-    octx.moveTo(pts[0][0], pts[0][1]);
-    pts.slice(1).forEach(([x,y]) => octx.lineTo(x,y));
-    if (mouseX !== undefined) octx.lineTo(mouseX, mouseY);
-    octx.stroke();
-    // 各点に円を描く
-    pts.forEach(([x,y]) => {
-      octx.beginPath();
-      octx.arc(x, y, 4, 0, 2*Math.PI);
-      octx.fillStyle = color;
-      octx.fill();
-    });
-  }
-}
-
-// ── アノテーション一覧更新 ────────────────────
+// ── アノテーション操作 ─────────────────────────
 function updateAnnoList() {
   const el = document.getElementById("anno-list");
-  if (state.annotations.length === 0) {
-    el.innerHTML = '<div class="text-muted p-2">アノテーションなし</div>';
+  if (!state.annotations.length) {
+    el.innerHTML = '<div class="text-muted p-2 small">アノテーションなし</div>';
     return;
   }
   el.innerHTML = state.annotations.map((a, i) => {
-    const color = COLORS[a.class_id % COLORS.length];
+    const c = COLORS[a.class_id % COLORS.length];
     return `<div class="px-2 py-1 d-flex justify-content-between align-items-center">
-      <span>
-        <span style="display:inline-block;width:10px;height:10px;background:${color};border-radius:2px;margin-right:4px"></span>
-        <small>${a.class_name} (${a.type})</small>
-      </span>
+      <span><span style="display:inline-block;width:10px;height:10px;
+             background:${c};border-radius:2px;margin-right:4px"></span>
+      <small>${a.class_name} (${a.type})</small></span>
       <button class="btn btn-xs btn-sm btn-outline-danger py-0 px-1"
-              onclick="deleteAnno(${i})">✕</button>
-    </div>`;
+              onclick="deleteAnno(${i})">✕</button></div>`;
   }).join("");
 }
-
-function deleteAnno(idx) {
-  state.annotations.splice(idx, 1);
-  redraw();
-  updateAnnoList();
+function deleteAnno(i) {
+  state.annotations.splice(i, 1); redraw(); updateAnnoList();
 }
-
-// ── 最後を削除 ────────────────────────────────
 document.getElementById("btn-del-last").addEventListener("click", () => {
-  if (state.annotations.length > 0) {
-    state.annotations.pop();
-    redraw(); updateAnnoList();
-  }
+  if (state.annotations.length) { state.annotations.pop(); redraw(); updateAnnoList(); }
 });
-
-// ── 全削除 ────────────────────────────────────
 document.getElementById("btn-clear-all").addEventListener("click", () => {
   if (!confirm("全アノテーションを削除しますか？")) return;
-  state.annotations = [];
-  redraw(); updateAnnoList();
+  state.annotations = []; redraw(); updateAnnoList();
 });
 
-// ── クラス管理 ────────────────────────────────
+// ── クラス管理 ─────────────────────────────────
 async function loadClasses() {
-  const res  = await fetch(`/api/projects/${state.project}/classes`);
-  const data = await res.json();
-  state.classes = data.classes || [];
-  state.selectedClass = 0;
-  renderClassList();
+  try {
+    const res  = await fetch("/api/projects/" + state.project + "/classes");
+    const data = await res.json();
+    state.classes = data.classes || [];
+    state.selectedClass = 0;
+    renderClassList();
+  } catch(e) { state.classes = []; }
 }
-
 function renderClassList() {
   const el = document.getElementById("class-list");
   el.innerHTML = state.classes.map((cls, i) => {
-    const color = COLORS[i % COLORS.length];
+    const c = COLORS[i % COLORS.length];
+    const bg = i === state.selectedClass ? "rgba(13,110,253,0.15)" : "";
     return `<div class="d-flex align-items-center gap-1 px-1 py-1"
-                 style="cursor:pointer;background:${i===state.selectedClass?'rgba(13,110,253,0.15)':''};border-radius:4px"
+                 style="cursor:pointer;background:${bg};border-radius:4px"
                  onclick="selectClass(${i})">
-      <span style="display:inline-block;width:12px;height:12px;background:${color};border-radius:2px;flex-shrink:0"></span>
+      <span style="display:inline-block;width:12px;height:12px;background:${c};
+                   border-radius:2px;flex-shrink:0"></span>
       <small class="flex-grow-1">${i}: ${cls}</small>
       <button class="btn btn-xs btn-sm py-0 px-1 btn-outline-danger"
-              onclick="event.stopPropagation();deleteClass(${i})">✕</button>
-    </div>`;
+              onclick="event.stopPropagation();deleteClass(${i})">✕</button></div>`;
   }).join("") || '<div class="text-muted p-2 small">クラスなし</div>';
 }
-
-function selectClass(i) {
-  state.selectedClass = i;
-  renderClassList();
-}
-
+function selectClass(i) { state.selectedClass = i; renderClassList(); }
 document.getElementById("btn-add-class").addEventListener("click", async () => {
   const name = document.getElementById("new-class-name").value.trim();
   if (!name || !state.project) return;
@@ -558,24 +711,19 @@ document.getElementById("btn-add-class").addEventListener("click", async () => {
   document.getElementById("new-class-name").value = "";
   renderClassList();
 });
-
 async function deleteClass(i) {
   state.classes.splice(i, 1);
-  if (state.selectedClass >= state.classes.length)
-    state.selectedClass = Math.max(0, state.classes.length - 1);
-  await saveClasses();
-  renderClassList();
+  state.selectedClass = Math.min(state.selectedClass, Math.max(0, state.classes.length-1));
+  await saveClasses(); renderClassList();
 }
-
 async function saveClasses() {
-  await fetch(`/api/projects/${state.project}/classes`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
+  await fetch("/api/projects/" + state.project + "/classes", {
+    method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({classes: state.classes})
   });
 }
 
-// ── ナビゲーション ────────────────────────────
+// ── ナビゲーション ─────────────────────────────
 document.getElementById("btn-prev").addEventListener("click", () => {
   if (state.currentIdx > 0) selectImage(state.currentIdx - 1);
 });
@@ -583,17 +731,172 @@ document.getElementById("btn-next").addEventListener("click", () => {
   if (state.currentIdx < state.images.length - 1) selectImage(state.currentIdx + 1);
 });
 
-// ── キーボードショートカット ──────────────────
+// ══════════════════════════════════════════════
+// カメラキャプチャ
+// ══════════════════════════════════════════════
+
+async function scanCameras() {
+  const engine = document.getElementById("cam-engine").value;
+  setCamStatus("検索中...", "text-muted");
+  try {
+    const res  = await fetch("/api/cameras?engine=" + engine);
+    const data = await res.json();
+    const sel  = document.getElementById("cam-idx");
+    sel.innerHTML = '<option value="">— カメラ —</option>';
+    (data.cameras || []).forEach(c => {
+      sel.appendChild(new Option("Camera " + c.index + " (" + c.width + "×" + c.height + ")", c.index));
+    });
+    const n = (data.cameras || []).length;
+    setCamStatus(n ? n + "台検出" : "カメラなし", n ? "text-success" : "text-warning");
+  } catch { setCamStatus("検索失敗", "text-danger"); }
+}
+document.getElementById("btn-cam-scan").addEventListener("click", scanCameras);
+
+document.getElementById("btn-cam-connect").addEventListener("click", async () => {
+  if (!state.project) { alert("先にプロジェクトを選択してください"); return; }
+  const camIdx = document.getElementById("cam-idx").value;
+  if (!camIdx) { alert("カメラを選択してください"); return; }
+  cam.engine   = document.getElementById("cam-engine").value;
+  cam.camIndex = parseInt(camIdx);
+  setCamStatus("接続中...", "text-muted");
+  document.getElementById("btn-cam-connect").disabled = true;
+  try {
+    const sr = await fetch("/api/camera/select", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({engine: cam.engine, camera_index: cam.camIndex})
+    });
+    const sd = await sr.json();
+    if (!sd.success) { setCamStatus("カメラを開けません", "text-danger"); return; }
+    const [w, h] = document.getElementById("cam-res").value.split("x").map(Number);
+    await fetch("/api/camera/resolution", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({engine: cam.engine, width: w, height: h})
+    });
+    setCamStatus("接続済み ✓", "text-success");
+    openCamModal();
+  } catch(e) {
+    setCamStatus("エラー: " + e.message, "text-danger");
+  } finally {
+    document.getElementById("btn-cam-connect").disabled = false;
+  }
+});
+
+function openCamModal() {
+  document.getElementById("cam-modal-backdrop").classList.add("show");
+  startPreview();
+}
+function closeCamModal() {
+  document.getElementById("cam-modal-backdrop").classList.remove("show");
+  stopPreview(); stopBurst();
+}
+document.getElementById("btn-cam-close").addEventListener("click", closeCamModal);
+
+function startPreview() {
+  stopPreview();
+  refreshPreview();
+  cam.previewTimer = setInterval(refreshPreview, 200);
+}
+function stopPreview() {
+  if (cam.previewTimer) { clearInterval(cam.previewTimer); cam.previewTimer = null; }
+}
+function refreshPreview() {
+  document.getElementById("cam-preview-img").src =
+    "/api/camera/preview?engine=" + cam.engine + "&t=" + Date.now();
+}
+
+document.getElementById("btn-snapshot").addEventListener("click", takeSnapshot);
+async function takeSnapshot() {
+  if (!state.project) return;
+  try {
+    const res  = await fetch("/api/camera/snapshot", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({engine: cam.engine, project_name: state.project})
+    });
+    const data = await res.json();
+    if (data.success) {
+      cam.capturedCount++;
+      document.getElementById("cam-cap-count").textContent = cam.capturedCount + "枚キャプチャ済み";
+      addThumb(data.filename);
+      await refreshImageList();
+      // キャプチャした画像を即選択してキャンバスに表示
+      const idx = state.images.indexOf(data.filename);
+      if (idx >= 0) selectImage(idx);
+    } else {
+      setCamStatus("キャプチャ失敗: " + (data.error || ""), "text-danger");
+    }
+  } catch(e) { setCamStatus("エラー: " + e.message, "text-danger"); }
+}
+
+document.getElementById("btn-burst-start").addEventListener("click", () => {
+  if (!state.project || cam.burstTimer) return;
+  cam.burstTotal = parseInt(document.getElementById("burst-n").value) || 10;
+  const ms       = parseInt(document.getElementById("burst-ms").value) || 500;
+  cam.burstDone  = 0;
+  document.getElementById("burst-progress-wrap").style.display = "";
+  document.getElementById("btn-burst-start").disabled = true;
+  document.getElementById("btn-burst-stop").disabled  = false;
+  document.getElementById("btn-snapshot").disabled    = true;
+  updateBurstUI();
+  cam.burstTimer = setInterval(async () => {
+    await takeSnapshot();
+    cam.burstDone++;
+    updateBurstUI();
+    if (cam.burstDone >= cam.burstTotal) stopBurst();
+  }, ms);
+});
+document.getElementById("btn-burst-stop").addEventListener("click", stopBurst);
+function stopBurst() {
+  if (cam.burstTimer) { clearInterval(cam.burstTimer); cam.burstTimer = null; }
+  document.getElementById("burst-progress-wrap").style.display = "none";
+  document.getElementById("btn-burst-start").disabled = false;
+  document.getElementById("btn-burst-stop").disabled  = true;
+  document.getElementById("btn-snapshot").disabled    = false;
+}
+function updateBurstUI() {
+  const pct = cam.burstTotal ? Math.round(cam.burstDone / cam.burstTotal * 100) : 0;
+  document.getElementById("burst-bar").style.width = pct + "%";
+  document.getElementById("burst-lbl").textContent  = cam.burstDone + " / " + cam.burstTotal + " 枚";
+}
+function addThumb(filename) {
+  const strip = document.getElementById("captured-strip");
+  const img   = document.createElement("img");
+  img.src   = "/api/projects/" + state.project + "/image/" + encodeURIComponent(filename) + "?t=" + Date.now();
+  img.title = filename;
+  img.addEventListener("click", () => {
+    const idx = state.images.indexOf(filename);
+    if (idx >= 0) { closeCamModal(); selectImage(idx); }
+  });
+  strip.insertBefore(img, strip.firstChild);
+}
+document.getElementById("btn-clear-cap").addEventListener("click", () => {
+  document.getElementById("captured-strip").innerHTML = "";
+  cam.capturedCount = 0;
+  document.getElementById("cam-cap-count").textContent = "0枚キャプチャ済み";
+});
+function setCamStatus(msg, cls) {
+  const el = document.getElementById("cam-status");
+  el.className = "small text-center " + (cls || "text-muted");
+  el.textContent = msg;
+}
+
+// ══════════════════════════════════════════════
+// キーボードショートカット
+// ══════════════════════════════════════════════
 document.addEventListener("keydown", e => {
-  if (e.key === "ArrowLeft")  document.getElementById("btn-prev").click();
-  if (e.key === "ArrowRight") document.getElementById("btn-next").click();
+  const inModal = document.getElementById("cam-modal-backdrop").classList.contains("show");
+  if (e.key === "Escape")     { closeCamModal(); return; }
+  if (e.key === " " && inModal) { e.preventDefault(); takeSnapshot(); return; }
+  if (e.key === "ArrowLeft"  && !inModal) document.getElementById("btn-prev").click();
+  if (e.key === "ArrowRight" && !inModal) document.getElementById("btn-next").click();
   if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     document.getElementById("btn-save-label").click();
   }
-  // 数字キーでクラス選択
   const num = parseInt(e.key);
-  if (!isNaN(num) && num < state.classes.length) { selectClass(num); }
+  if (!isNaN(num) && num < state.classes.length) selectClass(num);
 });
+
+// 初期カメラスキャン
+scanCameras();
 </script>
 {% endblock %}

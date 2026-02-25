@@ -317,6 +317,40 @@ class ServiceClient:
             "classes":      classes or [],
         })
 
+    # ──────────────────────────────────────────
+    # 汎用パススルーメソッド
+    # server.py から直接エンドポイントを指定して呼び出す際に使用する。
+    # 名前付きメソッドが存在しない新規エンドポイントにも対応できるよう
+    # 汎用インターフェースを提供する。
+    # ──────────────────────────────────────────
+    def get(self, engine: EngineType, endpoint: str) -> Dict[str, Any]:
+        """汎用GETリクエスト。エンドポイントを直接指定して呼び出す。"""
+        return self._get(engine, endpoint)
+
+    def post(
+        self,
+        engine:   EngineType,
+        endpoint: str,
+        data:     Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """汎用POSTリクエスト。エンドポイントを直接指定して呼び出す。"""
+        return self._post(engine, endpoint, data)
+
+    def get_raw(self, engine: EngineType, endpoint: str) -> Optional[bytes]:
+        """
+        汎用GETリクエスト（バイナリレスポンス用）。
+        画像フレームなどバイト列を返すエンドポイントに使用する。
+        取得失敗時は None を返す。
+        """
+        url = self._url(engine, endpoint)
+        try:
+            resp = self._session.get(url, timeout=5)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as exc:
+            logger.debug("バイナリ取得失敗 %s: %s", url, exc)
+            return None
+
     def close(self) -> None:
         """セッションを閉じる（コンテキストマネージャ対応）。"""
         self._session.close()

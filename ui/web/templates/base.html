@@ -81,16 +81,62 @@
     .chain-step.error   { border-color: #dc3545; background: rgba(220,53,69,0.12); }
     .chain-step.waiting { border-color: #ffc107; background: rgba(255,193,7,0.08); }
 
-    /* ─── セレクトボックスの高さ固定 ─── */
-    /* height: auto !important は max-height を無効化し、options の数に応じて
-       select が無限に伸びるバグを引き起こす。
-       代わりに min-height のみリセットし max-height で上限を強制する。 */
+    /* ─── ネイティブ select を非表示にする ─── */
+    /* Qt WebEngine は <select> クリック時に OS ネイティブポップアップを
+       描画し、その際ページレイアウトを白い背景で無限に拡張するバグがある。
+       下の JS ポリフィルが純粋 HTML ドロップダウン (.cs-*) に置換するため
+       ネイティブ select 自体は非表示にする。 */
     select.form-select,
     select.form-select-sm {
-      min-height: unset !important;
-      max-height: 2.2rem !important;
-      overflow: hidden;
+      display: none !important;
     }
+
+    /* ─── カスタムセレクト (.cs-*) ─── */
+    .cs-wrap {
+      position: relative; display: block; min-width: 0;
+    }
+    .cs-btn {
+      display: flex; align-items: center; justify-content: space-between;
+      width: 100%; height: 2.15rem;
+      padding: 0.25rem 0.5rem;
+      font-size: 0.875rem; font-family: inherit; line-height: 1.5;
+      color: var(--bs-body-color);
+      background-color: var(--bs-body-bg);
+      border: 1px solid var(--bs-border-color);
+      border-radius: var(--bs-border-radius-sm, 0.25rem);
+      cursor: pointer; text-align: left; box-sizing: border-box;
+      transition: border-color .15s ease-in-out, box-shadow .15s ease-in-out;
+    }
+    .cs-btn:focus {
+      outline: none; border-color: #86b7fe;
+      box-shadow: 0 0 0 0.25rem rgba(13,110,253,.25);
+    }
+    .cs-btn-text {
+      flex: 1; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; min-width: 0;
+    }
+    .cs-btn-caret {
+      flex-shrink: 0; margin-left: 0.35rem;
+      font-size: 0.6rem; opacity: 0.55;
+    }
+    .cs-menu {
+      position: absolute; z-index: 1055; left: 0; top: 100%;
+      min-width: 100%; max-height: 200px; overflow-y: auto;
+      background-color: var(--bs-dropdown-bg, #2b2b2b);
+      border: 1px solid var(--bs-border-color);
+      border-radius: var(--bs-border-radius-sm, 0.25rem);
+      box-shadow: 0 4px 12px rgba(0,0,0,.45);
+      display: none;
+    }
+    .cs-menu.show { display: block; }
+    .cs-opt {
+      padding: 0.25rem 0.75rem; font-size: 0.875rem;
+      color: var(--bs-body-color);
+      cursor: pointer; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; user-select: none;
+    }
+    .cs-opt:hover    { background-color: rgba(255,255,255,.08); }
+    .cs-opt.cs-active { background-color: var(--bs-primary,#0d6efd); color:#fff; }
 
     /* ─── スクロールバー細め ─── */
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -141,6 +187,170 @@
 
 <!-- Bootstrap JS -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- ─── カスタムセレクトポリフィル ─────────────────────────────────────────
+     Qt WebEngine は <select> クリック時に OS ネイティブポップアップを描画し
+     ページレイアウトを白い背景で無限に拡張するバグがある。
+     すべての .form-select を純粋 HTML ドロップダウンに置換することで回避する。
+     既存 JS は非表示のネイティブ select 経由で引き続き動作する:
+       sel.value = x        → patchSetter で label を同期
+       sel.selectedIndex = n → patchSetter で label を同期
+       sel.innerHTML = ...  → MutationObserver でメニューを再構築
+       sel.appendChild(opt) → MutationObserver でメニューを再構築
+       sel.dispatchEvent()  → そのまま native select に委譲
+-->
+<script>
+(function () {
+  'use strict';
+
+  function CustomSelect(native) {
+    var self    = this;
+    this.el     = native;
+    this.isOpen = false;
+
+    // ── ラッパー ──────────────────────────────────────────
+    var wrap = document.createElement('div');
+    wrap.className = 'cs-wrap';
+    if (native.style.flex) wrap.style.flex = native.style.flex;
+    // Bootstrap スペーシングクラス (mb-2, mt-1 など) をコピー
+    Array.from(native.classList).forEach(function (c) {
+      if (/^m[tbesxy]-/.test(c)) wrap.classList.add(c);
+    });
+
+    // ── トグルボタン ──────────────────────────────────────
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cs-btn';
+    btn.setAttribute('aria-haspopup', 'listbox');
+    btn.setAttribute('aria-expanded', 'false');
+
+    var label = document.createElement('span');
+    label.className = 'cs-btn-text';
+
+    var caret = document.createElement('span');
+    caret.className = 'cs-btn-caret';
+    caret.textContent = '▾';
+
+    btn.appendChild(label);
+    btn.appendChild(caret);
+
+    // ── ドロップダウンメニュー ────────────────────────────
+    var menu = document.createElement('div');
+    menu.className = 'cs-menu';
+    menu.setAttribute('role', 'listbox');
+
+    wrap.appendChild(btn);
+    wrap.appendChild(menu);
+
+    // ネイティブ select はラッパー内に隠す (CSS で display:none 済み)
+    native.parentNode.insertBefore(wrap, native);
+    wrap.appendChild(native);
+
+    this.wrap  = wrap;
+    this.btn   = btn;
+    this.label = label;
+    this.menu  = menu;
+
+    // ── イベント ──────────────────────────────────────────
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      self.isOpen ? self._close() : self._open();
+    });
+    document.addEventListener('click', function () { self._close(); });
+
+    // ── 初期描画 ──────────────────────────────────────────
+    this._rebuild();
+
+    // ── オプション変更の監視 ──────────────────────────────
+    // sel.innerHTML = '...' / sel.appendChild(opt) に対応
+    var obs = new MutationObserver(function () { self._rebuild(); });
+    obs.observe(native, { childList: true });
+
+    // ── value / selectedIndex セッターをパッチ ────────────
+    // sel.value = 'x' や sel.selectedIndex = n でラベルを更新する
+    function patchSetter(prop) {
+      var desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, prop);
+      Object.defineProperty(native, prop, {
+        get: function ()  { return desc.get.call(native); },
+        set: function (v) { desc.set.call(native, v); self._syncLabel(); },
+        configurable: true,
+      });
+    }
+    patchSetter('value');
+    patchSetter('selectedIndex');
+  }
+
+  CustomSelect.prototype._rebuild = function () {
+    var self = this;
+    var sel  = this.el;
+    var menu = this.menu;
+
+    menu.innerHTML = '';
+    for (var i = 0; i < sel.options.length; i++) {
+      (function (idx) {
+        var item = document.createElement('div');
+        item.className   = 'cs-opt' + (idx === sel.selectedIndex ? ' cs-active' : '');
+        item.textContent = sel.options[idx].text;
+        item.setAttribute('role', 'option');
+        item.addEventListener('click', function (e) {
+          e.stopPropagation();
+          sel.selectedIndex = idx;   // パッチ済みセッター → _syncLabel
+          self._close();
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        menu.appendChild(item);
+      }(i));
+    }
+    this._syncLabel();
+  };
+
+  CustomSelect.prototype._syncLabel = function () {
+    var opt = this.el.options[this.el.selectedIndex];
+    this.label.textContent = opt ? opt.text : '';
+    var items = this.menu.querySelectorAll('.cs-opt');
+    var idx   = this.el.selectedIndex;
+    for (var i = 0; i < items.length; i++) {
+      items[i].classList.toggle('cs-active', i === idx);
+    }
+  };
+
+  CustomSelect.prototype._open = function () {
+    this.isOpen = true;
+    this._rebuild();
+    this.menu.classList.add('show');
+    this.btn.setAttribute('aria-expanded', 'true');
+    // ビューポート下端を超える場合は上方向に表示
+    var rect = this.btn.getBoundingClientRect();
+    if (rect.bottom + 210 > window.innerHeight) {
+      this.menu.style.top    = 'auto';
+      this.menu.style.bottom = '100%';
+    } else {
+      this.menu.style.top    = '100%';
+      this.menu.style.bottom = 'auto';
+    }
+    var active = this.menu.querySelector('.cs-active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  };
+
+  CustomSelect.prototype._close = function () {
+    this.isOpen = false;
+    this.menu.classList.remove('show');
+    this.btn.setAttribute('aria-expanded', 'false');
+  };
+
+  function initAll() {
+    document.querySelectorAll('select.form-select').forEach(function (sel) {
+      if (!sel._cs) { sel._cs = new CustomSelect(sel); }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initAll);
+  } else {
+    initAll();
+  }
+}());
+</script>
 
 <script>
 // ─── サービスヘルスポーリング (15秒間隔) ──────────────────────────

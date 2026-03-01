@@ -82,12 +82,13 @@
     .chain-step.waiting { border-color: #ffc107; background: rgba(255,193,7,0.08); }
 
     /* ─── セレクトボックスの高さ固定 ─── */
-    /* Windows環境でオプションが0件のときselect要素が縦に伸びるのを防ぐ */
+    /* height: auto !important は max-height を無効化し、options の数に応じて
+       select が無限に伸びるバグを引き起こす。
+       代わりに min-height のみリセットし max-height で上限を強制する。 */
     select.form-select,
     select.form-select-sm {
       min-height: unset !important;
-      height: auto !important;
-      max-height: 2.2rem;
+      max-height: 2.2rem !important;
       overflow: hidden;
     }
 

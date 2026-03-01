@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+import torch
 from flask import Flask, Response, jsonify, request
 from werkzeug.utils import secure_filename
 
@@ -71,6 +72,39 @@ logger = logging.getLogger(__name__)
 
 # Ultralytics の過剰なログを抑制する
 logging.getLogger("ultralytics").setLevel(logging.WARNING)
+
+
+# ──────────────────────────────────────────────
+# CUDAデバイス安全検出
+# ──────────────────────────────────────────────
+
+def _detect_safe_device() -> str:
+    """
+    CUDAが実際に動作するか検証し、エラー時はCPUにフォールバックする。
+
+    torch.cuda.is_available() はドライバ/ライブラリのバージョン不整合があっても
+    True を返すことがある。実際に小さなCUDA演算を実行して動作を確認する。
+    """
+    try:
+        if torch.cuda.is_available():
+            _t = torch.zeros(1, device="cuda")
+            del _t
+            torch.cuda.empty_cache()
+            device_name = torch.cuda.get_device_name(0)
+            logger.info("CUDAデバイスを確認しました: %s", device_name)
+            return "cuda"
+    except Exception as exc:
+        logger.warning(
+            "CUDAが検出されましたが使用できません (%s)。CPUにフォールバックします。",
+            exc,
+        )
+    logger.info("推論デバイス: CPU")
+    return "cpu"
+
+
+# アクティブデバイス — 起動時に安全検証済みのデバイスで初期化
+_active_device: str = _detect_safe_device()
+
 
 # ──────────────────────────────────────────────
 # アプリケーション初期化
@@ -122,18 +156,43 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
     """
     フレームに対してYOLO推論を実行し、統一フォーマットのリストを返す。
     タスク種別 (detect/segment/obb/pose) に応じて結果を変換する。
+
+    CUDAエラーが発生した場合は自動的にCPUにフォールバックする。
     """
+    global _active_device
+
     if current_model is None:
         return []
 
-    results_list = current_model.predict(
-        frame,
-        conf    = detection_settings["conf"],
-        iou     = detection_settings["iou"],
-        max_det = detection_settings["max_det"],
-        classes = detection_settings["classes"],
-        verbose = False,
-    )
+    def _predict_on(device: str) -> list:
+        return current_model.predict(
+            frame,
+            conf    = detection_settings["conf"],
+            iou     = detection_settings["iou"],
+            max_det = detection_settings["max_det"],
+            classes = detection_settings["classes"],
+            verbose = False,
+            device  = device,
+        )
+
+    try:
+        results_list = _predict_on(_active_device)
+    except Exception as exc:
+        exc_str = str(exc)
+        cuda_keywords = ("CUDA", "cuda", "CUBLAS", "cuDNN", "cublas", "cudnn",
+                         "OutOfMemoryError", "device-side assert")
+        if any(kw in exc_str for kw in cuda_keywords):
+            logger.error(
+                "CUDA推論エラーが発生しました。CPUにフォールバックします: %s", exc
+            )
+            _active_device = "cpu"
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            results_list = _predict_on("cpu")
+        else:
+            raise
 
     detections: List[Dict[str, Any]] = []
     if not results_list:
@@ -523,8 +582,10 @@ def load_model():
                 "loaded":      True,
                 "class_count": len(yolo.names) if yolo.names else 0,
                 "task":        task,
+                "device":      _active_device,
             }
-        logger.info("YOLOモデルをロードしました: %s (タスク: %s)", name, task)
+        logger.info("YOLOモデルをロードしました: %s (タスク: %s, デバイス: %s)",
+                    name, task, _active_device)
         return jsonify({"success": True, "model_info": model_info})
     except Exception as exc:
         logger.error("モデルロードエラー: %s", exc)
@@ -534,6 +595,33 @@ def load_model():
 @app.route("/api/model/info")
 def model_info_route():
     return jsonify({"success": True, "model_info": model_info})
+
+
+@app.route("/api/device", methods=["GET", "POST"])
+def device_route():
+    """
+    推論デバイスの取得・変更エンドポイント。
+
+    GET  → 現在のデバイスとCUDA可否を返す。
+    POST {"device": "cuda"|"cpu"} → デバイスを切り替える。
+         "cuda" を要求した場合は実際に動作検証を行い、
+         失敗時は自動的に "cpu" を設定してその旨を返す。
+    """
+    global _active_device
+    if request.method == "POST":
+        requested = (request.json or {}).get("device", "cpu")
+        if requested == "cuda":
+            _active_device = _detect_safe_device()
+        else:
+            _active_device = "cpu"
+        return jsonify({"success": True, "device": _active_device})
+    cuda_ok = torch.cuda.is_available()
+    return jsonify({
+        "success":          True,
+        "active_device":    _active_device,
+        "cuda_available":   cuda_ok,
+        "cuda_device_name": torch.cuda.get_device_name(0) if cuda_ok else None,
+    })
 
 
 # ── カメラ管理 (DRY: CameraManager) ──────────────

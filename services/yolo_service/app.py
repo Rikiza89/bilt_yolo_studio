@@ -162,6 +162,7 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
 
     CUDAエラーが発生した場合は自動的にCPUにフォールバックする。
     """
+    global _active_device
     if current_model is None:
         return []
 
@@ -190,7 +191,7 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
                 "CUDA推論エラーが発生しました。CPUにフォールバックします: %s", exc
             )
             with _device_lock:
-                global _active_device
+                
                 _active_device = "cpu"
             try:
                 torch.cuda.empty_cache()

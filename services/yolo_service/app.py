@@ -103,6 +103,9 @@ def _detect_safe_device() -> str:
 
 
 # アクティブデバイス — 起動時に安全検証済みのデバイスで初期化
+# Protected by _device_lock to avoid races between the detection thread
+# and the /api/device endpoint handler.
+_device_lock = threading.Lock()
 _active_device: str = _detect_safe_device()
 
 
@@ -159,8 +162,6 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
 
     CUDAエラーが発生した場合は自動的にCPUにフォールバックする。
     """
-    global _active_device
-
     if current_model is None:
         return []
 
@@ -175,8 +176,11 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
             device  = device,
         )
 
+    with _device_lock:
+        device = _active_device
+
     try:
-        results_list = _predict_on(_active_device)
+        results_list = _predict_on(device)
     except Exception as exc:
         exc_str = str(exc)
         cuda_keywords = ("CUDA", "cuda", "CUBLAS", "cuDNN", "cublas", "cudnn",
@@ -185,7 +189,9 @@ def _yolo_predict(frame: np.ndarray) -> List[Dict[str, Any]]:
             logger.error(
                 "CUDA推論エラーが発生しました。CPUにフォールバックします: %s", exc
             )
-            _active_device = "cpu"
+            with _device_lock:
+                global _active_device
+                _active_device = "cpu"
             try:
                 torch.cuda.empty_cache()
             except Exception:
@@ -573,6 +579,8 @@ def load_model():
     try:
         yolo = YOLO(str(path) if path.exists() else name)
         task = getattr(yolo, "task", "detect") or "detect"
+        with _device_lock:
+            active = _active_device
         with _model_lock:
             current_model = yolo
             detection_settings["task"] = task
@@ -582,7 +590,7 @@ def load_model():
                 "loaded":      True,
                 "class_count": len(yolo.names) if yolo.names else 0,
                 "task":        task,
-                "device":      _active_device,
+                "device":      active,
             }
         logger.info("YOLOモデルをロードしました: %s (タスク: %s, デバイス: %s)",
                     name, task, _active_device)
@@ -607,18 +615,19 @@ def device_route():
          "cuda" を要求した場合は実際に動作検証を行い、
          失敗時は自動的に "cpu" を設定してその旨を返す。
     """
-    global _active_device
     if request.method == "POST":
         requested = (request.json or {}).get("device", "cpu")
-        if requested == "cuda":
-            _active_device = _detect_safe_device()
-        else:
-            _active_device = "cpu"
-        return jsonify({"success": True, "device": _active_device})
+        new_device = _detect_safe_device() if requested == "cuda" else "cpu"
+        with _device_lock:
+            global _active_device
+            _active_device = new_device
+        return jsonify({"success": True, "device": new_device})
     cuda_ok = torch.cuda.is_available()
+    with _device_lock:
+        current = _active_device
     return jsonify({
         "success":          True,
-        "active_device":    _active_device,
+        "active_device":    current,
         "cuda_available":   cuda_ok,
         "cuda_device_name": torch.cuda.get_device_name(0) if cuda_ok else None,
     })

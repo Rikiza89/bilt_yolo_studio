@@ -308,6 +308,13 @@ def main() -> int:
 
     # ── 4. PySide6 アプリケーションを起動する ─────
     # QApplication は必ずメインスレッドで初期化する
+    # Platform-specific Qt backend selection MUST be set before any Qt import
+    # because Qt caches the platform plugin selection at import time.
+    if sys.platform == "win32":
+        os.environ.setdefault("QT_QPA_PLATFORM", "windows")
+    elif sys.platform == "linux":
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
     try:
         from PySide6.QtWidgets import QApplication
         from ui.pyside.main_window import StudioMainWindow
@@ -316,12 +323,6 @@ def main() -> int:
         logger.error("pip install PySide6 PyQt6-WebEngine を実行してください")
         _cleanup(services)
         return 1
-
-    # Platform-specific Qt backend selection (must be set before QApplication)
-    if sys.platform == "win32":
-        os.environ.setdefault("QT_QPA_PLATFORM", "windows")
-    elif sys.platform == "linux":
-        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
     app = QApplication(sys.argv)
     app.setApplicationName("BILT+YOLO Studio")

@@ -103,14 +103,19 @@ class CameraManager:
         Useful for endpoints that need a one-shot capture
         (e.g. preview, snapshot) where the camera may have been
         released after a device scan on Windows CAP_DSHOW.
+
+        If no camera has been initialized yet, falls back to camera 0
+        so the first-time preview request can still succeed.
         """
         frame = self.grab_frame()
-        if frame is None and self._camera_index is not None:
+        if frame is None:
+            # Use the previously-known index, or default to 0 on first use.
+            index = self._camera_index if self._camera_index is not None else 0
             logger.warning(
                 "Frame grab failed — reinitializing camera %d",
-                self._camera_index,
+                index,
             )
-            if self.init_camera(self._camera_index):
+            if self.init_camera(index):
                 time.sleep(0.15)
                 frame = self.grab_frame()
         return frame

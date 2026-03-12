@@ -56,7 +56,7 @@ class Trainer:
             num_workers=num_workers,
             shuffle=False,
             input_size=input_size,
-            training=True
+            training=False
         )
         
         # Create model
